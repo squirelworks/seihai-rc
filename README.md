@@ -10,8 +10,33 @@ Part of the Seihai server stack:
 [seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) (GPL fork of GServer-v2, ships first) ·
 client: [seihai](https://github.com/squirelworks/seihai).
 
-**Status: scaffold.** Nothing works yet. The plan is in [docs/PLAN.md](docs/PLAN.md),
-the rules every contributor and coding agent follows are in [AGENTS.md](AGENTS.md).
+**Status: stage 1, command line only.** Log in directly or through the
+listserver's RC list, watch the RC chat, list the players online. The plan is in
+[docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
+[docs/PROTOCOL.md](docs/PROTOCOL.md), and the rules every contributor and coding
+agent follows in [AGENTS.md](AGENTS.md).
+
+## Use
+
+The password is read from an environment variable, never from the command line.
+
+```
+export SEIHAI_RC_PASSWORD=...
+
+# Servers on the listserver's RC list
+seihai-rc servers --listserver 127.0.0.1:14922 --account myrc
+
+# Players online, direct or picked from the RC list (by number or name)
+seihai-rc players list --server 127.0.0.1:14802 --account myrc
+seihai-rc players list --listserver 127.0.0.1:14922 --pick "My Server" --account myrc --tsv
+
+# Log in and print the RC chat and joins for 30 seconds
+seihai-rc login --server 127.0.0.1:14802 --account myrc --nick "My RC" --for 30
+```
+
+`--rc classic` logs in as the 2000 to 2002 RCs did (type 1, plain zlib);
+the default is the newer gen-5 login (type 6). `seihai-rc --help` lists every
+option. The account must be staff on the gserver and allowed from your IP.
 
 ## Build
 
@@ -19,6 +44,9 @@ the rules every contributor and coding agent follows are in [AGENTS.md](AGENTS.m
 cargo build --release
 cargo test
 ```
+
+The tests run the client against small fake servers on loopback. Lab runs
+against the gserver-v2 fork are recorded in [docs/lab](docs/lab).
 
 Releases for Linux, Windows and macOS are built by GitHub Actions on each `v*` tag.
 

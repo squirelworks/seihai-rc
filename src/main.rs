@@ -1,24 +1,346 @@
-//! seihai-rc: A Graal Remote Control (RC) client for server staff: players, accounts, options, files and NPC Control.
-//!
-//! Scaffold only. The plan is in `docs/PLAN.md`; the rules are in `AGENTS.md`.
+//! `seihai-rc`: the command line.
 
-fn main() {
-    if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("seihai-rc {}", env!("CARGO_PKG_VERSION"));
-        return;
+use std::process::ExitCode;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use seihai_rc::listserver::{fetch_rc_list, pick};
+use seihai_rc::rc::{Event, LoginParams, PlayerEntry, RcKind, Session};
+
+const USAGE: &str = "\
+seihai-rc: Graal Remote Control client (stage 1)
+
+USAGE:
+  seihai-rc servers --listserver HOST:PORT --account NAME [options]
+  seihai-rc login   (--server HOST:PORT | --listserver HOST:PORT --pick NAME|N)
+                    --account NAME [--for SECS] [--say TEXT] [options]
+  seihai-rc players list (--server ... | --listserver ... --pick ...)
+                    --account NAME [--tsv] [--settle MS] [options]
+
+  servers       Log in to the listserver's RC list and print every server.
+  login         Log in to a gserver and print server messages and the RC
+                chat for --for seconds (default 5; 0 = until the server
+                closes the link). --say sends one RC chat line first.
+  players list  Log in and print the players and RCs online.
+
+OPTIONS:
+  --password-env VAR   Read the password from this environment variable
+                       (default SEIHAI_RC_PASSWORD). Passwords are never
+                       taken on the command line.
+  --rc gen5|classic    Login type: gen5 (type 6, default) or classic
+                       (type 1, the 2000 to 2002 RCs, plain zlib).
+  --token TOKEN        8-byte version token (default GSERV025 for gen5,
+                       GSERV023 for classic).
+  --nick NAME          Nickname to send after the login.
+  --timeout SECS       Connect and login timeout (default 10).
+  --settle MS          players list: wait until no message came for this
+                       long before printing (default 1000).
+  --tsv                players list: tab-separated, with a header.
+  -v, --verbose        login: also show the ids of messages not read yet.
+  -V, --version        Print the version.
+";
+
+#[derive(Default)]
+struct Opts {
+    cmd: Vec<String>,
+    server: Option<String>,
+    listserver: Option<String>,
+    pick: Option<String>,
+    account: Option<String>,
+    password_env: Option<String>,
+    rc: Option<String>,
+    token: Option<String>,
+    nick: Option<String>,
+    timeout: Option<u64>,
+    settle: Option<u64>,
+    for_secs: Option<u64>,
+    say: Option<String>,
+    tsv: bool,
+    verbose: bool,
+}
+
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
+    let mut o = Opts::default();
+    let mut it = args.peekable();
+    while let Some(a) = it.next() {
+        let mut val = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        let num = |name: &str, v: String| {
+            v.parse::<u64>()
+                .map_err(|_| format!("{name}: not a number: {v}"))
+        };
+        match a.as_str() {
+            "--server" => o.server = Some(val(&a)?),
+            "--listserver" => o.listserver = Some(val(&a)?),
+            "--pick" => o.pick = Some(val(&a)?),
+            "--account" => o.account = Some(val(&a)?),
+            "--password-env" => o.password_env = Some(val(&a)?),
+            "--rc" => o.rc = Some(val(&a)?),
+            "--token" => o.token = Some(val(&a)?),
+            "--nick" => o.nick = Some(val(&a)?),
+            "--say" => o.say = Some(val(&a)?),
+            "--timeout" => o.timeout = Some(num(&a, val(&a)?)?),
+            "--settle" => o.settle = Some(num(&a, val(&a)?)?),
+            "--for" => o.for_secs = Some(num(&a, val(&a)?)?),
+            "--tsv" => o.tsv = true,
+            "-v" | "--verbose" => o.verbose = true,
+            s if s.starts_with('-') => return Err(format!("unknown option {s}")),
+            _ => o.cmd.push(a),
+        }
     }
-    eprintln!(
-        "seihai-rc {}: not implemented yet, see docs/PLAN.md",
-        env!("CARGO_PKG_VERSION")
-    );
-    std::process::exit(2);
+    Ok(o)
+}
+
+struct Common {
+    kind: RcKind,
+    token: String,
+    account: String,
+    password: String,
+    timeout: Duration,
+    key: u8,
+}
+
+fn common(o: &Opts) -> Result<Common, String> {
+    let kind = match &o.rc {
+        None => RcKind::Gen5,
+        Some(s) => {
+            RcKind::parse(s).ok_or_else(|| format!("--rc: expected gen5 or classic, got {s}"))?
+        }
+    };
+    let token = o
+        .token
+        .clone()
+        .unwrap_or_else(|| kind.default_token().to_string());
+    if token.len() != 8 {
+        return Err(format!("--token must be 8 bytes, got {token:?}"));
+    }
+    let account = o.account.clone().ok_or("--account is required")?;
+    let var = o
+        .password_env
+        .clone()
+        .unwrap_or_else(|| "SEIHAI_RC_PASSWORD".into());
+    let password = std::env::var(&var)
+        .map_err(|_| format!("set the password in the environment variable {var}"))?;
+    // Any key from 0 to 127 works; vary it per run like the clients do.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let key = (nanos >> 10) as u8 & 0x7F;
+    Ok(Common {
+        kind,
+        token,
+        account,
+        password,
+        timeout: Duration::from_secs(o.timeout.unwrap_or(10)),
+        key,
+    })
+}
+
+/// The gserver to log in to: `--server`, or `--pick` from the RC list.
+fn target(o: &Opts, c: &Common) -> Result<String, String> {
+    match (&o.server, &o.listserver, &o.pick) {
+        (Some(s), None, None) => Ok(s.clone()),
+        (None, Some(ls), Some(which)) => {
+            let reply = fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
+                .map_err(|e| format!("{ls}: {e}"))?;
+            let s = pick(&reply.servers, which).ok_or_else(|| {
+                format!("no single server matches {which:?} in the list from {ls}")
+            })?;
+            eprintln!("picked {} at {}:{}", s.name, s.host, s.port);
+            Ok(format!("{}:{}", s.host, s.port))
+        }
+        _ => Err("give either --server HOST:PORT, or --listserver HOST:PORT and --pick".into()),
+    }
+}
+
+fn login(o: &Opts, c: &Common) -> Result<(Session, String), String> {
+    let addr = target(o, c)?;
+    let p = LoginParams {
+        kind: c.kind,
+        token: c.token.clone(),
+        account: c.account.clone(),
+        password: c.password.clone(),
+        key: c.key,
+        nickname: o.nick.clone(),
+    };
+    let s =
+        Session::login(&addr, &p, c.timeout).map_err(|e| format!("{addr}: login failed: {e}"))?;
+    eprintln!("logged in to {addr} as {}", c.account);
+    Ok((s, addr))
+}
+
+fn print_event(ev: &Event, verbose: bool) {
+    match ev {
+        Event::Signature => {}
+        Event::Disconnect(why) => println!("[disconnected] {why}"),
+        Event::RcChat(line) => println!("[rc] {line}"),
+        Event::AdminMessage(m) => println!("[admin] {}", m.replace('\u{a7}', ": ")),
+        Event::PrivateMessage { from, text } => println!("[pm from {from}] {text}"),
+        Event::AddPlayer(e) => println!(
+            "[online] {} {} ({})",
+            e.id,
+            e.account,
+            if e.is_rc() { "RC" } else { e.level.as_str() }
+        ),
+        Event::DelPlayer(id) => println!("[offline] {id}"),
+        Event::Other(id, p) if verbose => eprintln!("[id {id}] {} bytes", p.len()),
+        Event::Other(..) => {}
+    }
+}
+
+fn cmd_servers(o: &Opts) -> Result<(), String> {
+    let c = common(o)?;
+    let ls = o.listserver.as_deref().ok_or("--listserver is required")?;
+    let reply = fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
+        .map_err(|e| format!("{ls}: {e}"))?;
+    if let Some(st) = &reply.status {
+        for line in st.lines() {
+            eprintln!("{line}");
+        }
+    }
+    for (i, s) in reply.servers.iter().enumerate() {
+        println!("{}", s.display_line(i + 1).trim_start());
+    }
+    Ok(())
+}
+
+fn cmd_login(o: &Opts) -> Result<(), String> {
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    if let Some(line) = &o.say {
+        s.send_rc_chat(line).map_err(|e| e.to_string())?;
+    }
+    let secs = o.for_secs.unwrap_or(5);
+    let deadline = if secs == 0 {
+        Instant::now() + Duration::from_secs(u64::from(u32::MAX))
+    } else {
+        Instant::now() + Duration::from_secs(secs)
+    };
+    loop {
+        match s.next_event(deadline).map_err(|e| e.to_string())? {
+            Some(ev) => {
+                print_event(&ev, o.verbose);
+                if matches!(ev, Event::Disconnect(_)) {
+                    break;
+                }
+            }
+            None => {
+                if s.is_closed() {
+                    println!("[closed] the server closed the link");
+                }
+                break;
+            }
+        }
+    }
+    s.close();
+    Ok(())
+}
+
+fn row(e: &PlayerEntry, tsv: bool) -> String {
+    let kind = if e.is_rc() { "rc" } else { "player" };
+    if tsv {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            e.id, kind, e.account, e.nickname, e.level, e.status, e.community
+        )
+    } else {
+        format!(
+            "{:>5}  {:<6}  {:<20}  {:<20}  {}",
+            e.id, kind, e.account, e.nickname, e.level
+        )
+    }
+}
+
+fn cmd_players_list(o: &Opts) -> Result<(), String> {
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    s.settle(quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    if o.tsv {
+        println!("id\tkind\taccount\tnickname\tlevel\tstatus\tcommunity");
+    } else {
+        println!(
+            "{:>5}  {:<6}  {:<20}  {:<20}  level",
+            "id", "kind", "account", "nickname"
+        );
+    }
+    for e in s.players.players.values() {
+        println!("{}", row(e, o.tsv));
+    }
+    if !o.tsv {
+        let n = s.players.players.values().filter(|e| !e.is_rc()).count();
+        let r = s.players.players.len() - n;
+        println!("{n} player(s), {r} other RC(s)");
+    }
+    s.close();
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("seihai-rc {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return if args.is_empty() {
+            ExitCode::from(2)
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+    let o = match parse_args(args.into_iter()) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("seihai-rc: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let cmd: Vec<&str> = o.cmd.iter().map(String::as_str).collect();
+    let result = match cmd.as_slice() {
+        ["servers"] => cmd_servers(&o),
+        ["login"] => cmd_login(&o),
+        ["players", "list"] | ["players"] => cmd_players_list(&o),
+        _ => {
+            eprintln!(
+                "seihai-rc: unknown command {:?}\n\n{USAGE}",
+                o.cmd.join(" ")
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("seihai-rc: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn args(s: &str) -> impl Iterator<Item = String> + '_ {
+        s.split_whitespace().map(String::from)
+    }
+
     #[test]
-    fn links_seihai_core() {
-        // Proves the shared crate builds on every CI target.
-        let _ = std::any::type_name::<seihai_core::protocol::ClientVersion>();
+    fn parses_players_list() {
+        let o = parse_args(args(
+            "players list --server 127.0.0.1:14802 --account a --tsv --settle 200",
+        ))
+        .unwrap();
+        assert_eq!(o.cmd, ["players", "list"]);
+        assert_eq!(o.server.as_deref(), Some("127.0.0.1:14802"));
+        assert!(o.tsv);
+        assert_eq!(o.settle, Some(200));
+    }
+
+    #[test]
+    fn rejects_unknown_option() {
+        assert!(parse_args(args("login --password secret")).is_err());
     }
 }

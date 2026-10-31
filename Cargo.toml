@@ -7,6 +7,14 @@ description = "A Graal Remote Control (RC) client for server staff: players, acc
 repository = "https://github.com/squirelworks/seihai-rc"
 publish = false
 
+[lib]
+name = "seihai_rc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seihai-rc"
+path = "src/main.rs"
+
 [dependencies]
 # Protocol, framing, version profiles and scripting shared with the Seihai client.
 seihai-core = { git = "https://github.com/squirelworks/seihai", tag = "v0.0.3", default-features = false }
