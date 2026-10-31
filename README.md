@@ -13,7 +13,9 @@ client: [seihai](https://github.com/squirelworks/seihai).
 **Status: stage 1, command line only.** Log in directly or through the
 listserver's RC list, watch the RC chat, list the players online. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
-[docs/PROTOCOL.md](docs/PROTOCOL.md), and the rules every contributor and coding
+[docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the ordered to-do list in
+[docs/NEXT.md](docs/NEXT.md), and the rules every contributor and coding
 agent follows in [AGENTS.md](AGENTS.md).
 
 ## Use

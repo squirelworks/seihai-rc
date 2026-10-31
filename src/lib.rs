@@ -7,5 +7,6 @@
 
 pub mod link;
 pub mod listserver;
+pub mod players;
 pub mod rc;
 pub mod wire;
