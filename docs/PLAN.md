@@ -20,8 +20,8 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
 
 ## Features, in order
 
-1. Connect (listserver RC list or direct host and port), log in, show server
-   messages and the RC chat.
+1. **Done (command line, 2026-10-31).** Connect (listserver RC list or direct
+   host and port), log in, show server messages and the RC chat, list players.
 2. Players: list, private message, message all, warp, disconnect, edit props and
    rights, local ban.
 3. Accounts: list with a filter, add, edit, delete.
@@ -32,3 +32,6 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
 Each feature: a command-line form first (`seihai-rc players list --server ...`),
 tested in CI against `seihai-gserver` and in the lab against the fork, then the
 window.
+
+Status and the next steps in order: [NEXT.md](NEXT.md). Code layout:
+[ARCHITECTURE.md](ARCHITECTURE.md).
