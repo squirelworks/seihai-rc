@@ -9,6 +9,7 @@ How `seihai-rc` is put together, and where new work goes. Read `AGENTS.md`
 main.rs        command line: parse options, run one command, print, exit code
    │
 rc.rs          RC session with a gserver: login, Event, PlayerList, message builders
+files.rs       file link on that session: list, get, put
 listserver.rs  RC list from the listserver: handshake, account, server picking
    │
 link.rs        one TCP link: frame codec (Plain / Gen5), send, recv with a deadline
