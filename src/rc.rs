@@ -162,8 +162,10 @@ pub enum Event {
     AdminMessage(String),
     /// A private message from player `from`.
     PrivateMessage { from: u16, text: String },
-    /// A player or RC is online, or its listed props changed.
+    /// A player or RC arrived. This id was not in the list.
     AddPlayer(PlayerEntry),
+    /// `ADDPLAYER` for an id already listed. The fork resends it when props change.
+    UpdatePlayer(PlayerEntry),
     /// A player or RC left.
     DelPlayer(u16),
     /// Anything else (id, payload).
@@ -242,10 +244,25 @@ impl PlayerList {
     /// Apply an event; true when the list changed.
     pub fn apply(&mut self, ev: &Event) -> bool {
         match ev {
-            Event::AddPlayer(e) => self.players.insert(e.id, e.clone()).as_ref() != Some(e),
+            Event::AddPlayer(e) | Event::UpdatePlayer(e) => {
+                self.players.insert(e.id, e.clone()).as_ref() != Some(e)
+            }
             Event::DelPlayer(id) => self.players.remove(id).is_some(),
             _ => false,
         }
+    }
+
+    /// Record `ev`. An `AddPlayer` whose id is already listed comes back as
+    /// `UpdatePlayer`, because the fork resends `ADDPLAYER` when props change
+    /// and that is not a new arrival. After `DelPlayer`, the next one is an
+    /// arrival again.
+    pub fn observe(&mut self, ev: Event) -> Event {
+        let ev = match ev {
+            Event::AddPlayer(e) if self.players.contains_key(&e.id) => Event::UpdatePlayer(e),
+            other => other,
+        };
+        self.apply(&ev);
+        ev
     }
 }
 
@@ -322,8 +339,7 @@ impl Session {
                     return Err(LoginError::Refused(why));
                 }
                 ok |= ev == Event::Signature;
-                s.players.apply(&ev);
-                s.pending.push(ev);
+                s.pending.push(s.players.observe(ev));
             }
             if ok {
                 break;
@@ -347,9 +363,7 @@ impl Session {
                 return Ok(None);
             };
             for m in &msgs {
-                let ev = parse_event(m);
-                self.players.apply(&ev);
-                self.pending.push(ev);
+                self.pending.push(self.players.observe(parse_event(m)));
             }
         }
     }
@@ -469,6 +483,41 @@ mod tests {
         assert!(l.players[&7].is_rc());
         assert!(l.apply(&Event::DelPlayer(7)));
         assert!(l.players.is_empty());
+    }
+
+    #[test]
+    fn repeated_addplayer_is_an_update() {
+        let mut l = PlayerList::default();
+        let first = PlayerEntry {
+            id: 6,
+            account: "test205".into(),
+            nickname: "default".into(),
+            level: "onlinestartlocal.nw".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            l.observe(Event::AddPlayer(first.clone())),
+            Event::AddPlayer(first.clone())
+        );
+        let mut moved = first.clone();
+        moved.level = "cave.nw".into();
+        moved.nickname = "Ally".into();
+        assert_eq!(
+            l.observe(Event::AddPlayer(moved.clone())),
+            Event::UpdatePlayer(moved.clone())
+        );
+        assert_eq!(l.players[&6], moved);
+        // The same bytes again are still an update: the id is already listed.
+        assert_eq!(
+            l.observe(Event::AddPlayer(moved.clone())),
+            Event::UpdatePlayer(moved.clone())
+        );
+        assert_eq!(l.observe(Event::DelPlayer(6)), Event::DelPlayer(6));
+        assert!(l.players.is_empty());
+        assert_eq!(
+            l.observe(Event::AddPlayer(moved.clone())),
+            Event::AddPlayer(moved)
+        );
     }
 
     #[test]

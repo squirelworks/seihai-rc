@@ -49,6 +49,12 @@ GSHORT id) when one leaves, and RC chat (74). There is no end marker after the
 first `ADDPLAYER`s, so `players list` waits until nothing has come for
 `--settle` ms.
 
+The fork also sends `ADDPLAYER` again for an id already in the list when that
+player's props change (2026-10-31 lab). `seihai-rc login` prints the first one
+as `[online]` and a later one for the same id as `[update]`, and replaces the
+stored entry. After `DELPLAYER`, the next `ADDPLAYER` for that id is `[online]`
+again. `players list` prints whichever entry was stored last.
+
 An RC's own entry is not sent to it. Other RCs are listed with a level of one
 space; seihai-rc shows them as kind `rc`.
 
