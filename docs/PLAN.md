@@ -28,6 +28,7 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
 4. Server options, folder config, server flags, file browser with upload and
    download.
 5. NPC Control: NPC list, edit script, add/delete NPC, classes, weapons, levels.
+   Login and plain-zlib framing are in (`seihai-rc nc login`). Lists are not.
 
 Each feature: a command-line form first (`seihai-rc players list --server ...`),
 tested in CI against `seihai-gserver` and in the lab against the fork, then the

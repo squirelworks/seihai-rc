@@ -48,7 +48,7 @@ needed for one link; do not add tokio unless a feature needs many links.
 | 2. Players: PM, message all, warp, disconnect, props, rights, ban | `src/players.rs` (builders + parsers), events in `rc::Event` | `seihai-rc players pm/warp/kick/props/rights/ban` |
 | 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/add/edit/del` |
 | 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc options get/set`, `seihai-rc files ls/get/put` |
-| 5. NPC Control | separate login to the NPC-server (NC); `src/nc.rs` | `seihai-rc nc ...` |
+| 5. NPC Control | separate login to the NPC-server (NC); `src/nc.rs` (login and plain zlib framing; lists later) | `seihai-rc nc login` |
 | Window | `src/ui/` behind a `gui` cargo feature, so the CLI builds without egui | `seihai-rc gui` |
 
 Each new message:
