@@ -138,11 +138,24 @@ impl Link {
     /// Send the login frame: `body` (with its line feed) as a plain zlib
     /// frame. Then switch to `codec` for everything after it.
     pub fn send_login(&mut self, body: &[u8], codec: Codec) -> io::Result<()> {
-        let frame = write_zlib_frame(body)?;
-        self.stream.write_all(&frame)?;
-        self.stream.flush()?;
+        self.send_plain(body)?;
         self.codec = codec;
         Ok(())
+    }
+
+    /// Send `body` (with its line feed) as a plain zlib frame.
+    ///
+    /// The codec stays as it is. The secure RC-list handshake sends two
+    /// plain frames, C1 and C2, and only then switches to gen 5.
+    pub fn send_plain(&mut self, body: &[u8]) -> io::Result<()> {
+        let frame = write_zlib_frame(body)?;
+        self.stream.write_all(&frame)?;
+        self.stream.flush()
+    }
+
+    /// Use `codec` for every frame after this call.
+    pub fn set_codec(&mut self, codec: Codec) {
+        self.codec = codec;
     }
 
     /// Send messages (without line feeds) in one frame.
@@ -183,10 +196,17 @@ impl Link {
     /// `Ok(None)` when the deadline passed or the peer closed the link
     /// (see [`Self::is_closed`]).
     pub fn recv(&mut self, deadline: Instant) -> io::Result<Option<Vec<Message>>> {
+        Ok(self.recv_body(deadline)?.map(|body| split_messages(&body)))
+    }
+
+    /// The next frame's decoded body, waiting at most until `deadline`.
+    ///
+    /// Unlike [`Self::recv`], the body is not split into messages. The
+    /// secure hello is one line that is not a `GCHAR` id.
+    pub fn recv_body(&mut self, deadline: Instant) -> io::Result<Option<Vec<u8>>> {
         loop {
             if let Some(frame) = self.take_frame() {
-                let body = self.codec.decode(&frame)?;
-                return Ok(Some(split_messages(&body)));
+                return Ok(Some(self.codec.decode(&frame)?));
             }
             if self.closed {
                 return Ok(None);

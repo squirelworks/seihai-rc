@@ -47,7 +47,7 @@ pub const NC_CLASS_SCRIPT: u8 = 162;
 pub const NC_CLASS_NAME: u8 = 163;
 /// Server to client: the weapon list.
 pub const NC_WEAPON_NAMES: u8 = 167;
-/// Server to client: a class was deleted. Payload still needs a lab check.
+/// Server to client: a class was deleted. `GSTRING` name.
 pub const NC_CLASS_DELETE_NOTIFY: u8 = 188;
 
 /// Client to server: ask for an NPC's attributes.
@@ -70,7 +70,7 @@ pub const NC_WEAPON_GET: u8 = 116;
 pub const NC_WEAPON_SET: u8 = 117;
 /// Client to server: delete a weapon.
 pub const NC_WEAPON_DELETE: u8 = 118;
-/// Client to server: delete a class. Not sent; see [`class_delete_message`].
+/// Client to server: delete a class. `GSTRING` name, as in [`class_set_message`].
 pub const NC_CLASS_DELETE: u8 = 119;
 
 /// Property ids inside an NPC row.
@@ -215,14 +215,26 @@ pub fn class_set_message(name: &str, script: &str) -> Result<Vec<u8>, NcError> {
     Ok(message(NC_CLASS_SET, &payload))
 }
 
-/// Id 119 is the class-delete packet. The notes still need a lab check to
-/// choose between a bare name and a length-prefixed string, so no bytes are
-/// produced.
-pub fn class_delete_message(_name: &str) -> Result<Vec<u8>, NcError> {
-    Err(NcError::NeedsLabCheck {
-        packet: "NC_CLASSDELETE (119)",
-        field: "the class name (bare text or a length-prefixed string)",
-    })
+/// Id 119: `GSTRING` name, the same string form as [`class_set_message`].
+///
+/// A bare class name (the rest of the line, as id 112 sends) is the other
+/// reading still open. It is not sent.
+pub fn class_delete_message(name: &str) -> Result<Vec<u8>, NcError> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &gstring_bytes("class name", name)?);
+    Ok(message(NC_CLASS_DELETE, &payload))
+}
+
+/// Id 188: `GSTRING` name, and only when that string is the whole payload.
+///
+/// A bare name is not read.
+pub fn parse_class_delete(payload: &[u8]) -> Option<String> {
+    let mut i = 0;
+    let name = text(&read_gstring(payload, &mut i)?);
+    if i != payload.len() {
+        return None;
+    }
+    Some(name)
 }
 
 /// Id 115: no payload.
@@ -371,8 +383,8 @@ pub enum NcEvent {
     Weapons(Vec<String>),
     /// Id 33.
     Weapon(WeaponScript),
-    /// Id 188. The bytes are kept. They are not read as a class name.
-    ClassDeleteRaw(Vec<u8>),
+    /// Id 188. The class name.
+    ClassDeleted(String),
     /// Any other message, or a known id whose payload did not match.
     Message { id: u8, payload: Vec<u8> },
 }
@@ -426,7 +438,13 @@ pub fn parse_event(m: &Message) -> NcEvent {
                 payload: p.clone(),
             },
         },
-        NC_CLASS_DELETE_NOTIFY => NcEvent::ClassDeleteRaw(p.clone()),
+        NC_CLASS_DELETE_NOTIFY => match parse_class_delete(p) {
+            Some(name) => NcEvent::ClassDeleted(name),
+            None => NcEvent::Message {
+                id: m.id,
+                payload: p.clone(),
+            },
+        },
         _ => NcEvent::Message {
             id: m.id,
             payload: p.clone(),
@@ -440,7 +458,7 @@ pub fn parse_event(m: &Message) -> NcEvent {
 /// server instead clears that field still needs a lab check. Each id 167
 /// replaces the weapon list. Whether a second one is a full list or an
 /// addition still needs a lab check; the notes describe the packet as the
-/// list. Id 188 does not remove a class.
+/// list. Id 188 removes a class whose name matches.
 #[derive(Debug, Clone, Default)]
 pub struct NcLists {
     pub npcs: BTreeMap<u32, NpcRow>,
@@ -472,6 +490,7 @@ impl NcLists {
                 self.npcs.remove(id);
             }
             NcEvent::Class(name) => self.classes.push(name.clone()),
+            NcEvent::ClassDeleted(name) => self.classes.retain(|stored| stored != name),
             NcEvent::Weapons(names) => self.weapons.clone_from(names),
             _ => {}
         }
@@ -702,11 +721,16 @@ mod tests {
     }
 
     #[test]
-    fn class_delete_sends_nothing() {
-        assert!(matches!(
-            class_delete_message("Foo"),
-            Err(NcError::NeedsLabCheck { .. })
-        ));
+    fn class_delete_uses_the_class_set_string() {
+        let set = class_set_message("Guard", "return;").unwrap();
+        let delete = class_delete_message("Guard").unwrap();
+        assert_eq!(delete[0], gchar(NC_CLASS_DELETE));
+        // GSTRING name, the bytes class set writes before the script.
+        assert_eq!(&delete[1..], b"%Guard");
+        assert_eq!(&set[1..1 + delete.len() - 1], &delete[1..]);
+        // A bare name is the other reading. It is not what we send.
+        assert_ne!(&delete[1..], b"Guard");
+        assert!(class_delete_message("a\nb").is_err());
     }
 
     #[test]
@@ -761,16 +785,29 @@ mod tests {
     }
 
     #[test]
-    fn class_delete_notify_is_not_parsed_as_a_name() {
+    fn class_delete_notify_is_a_gstring_name() {
+        let mut payload = Vec::new();
+        push_gstring(&mut payload, b"Foo");
         let ev = parse_event(&Message {
+            id: NC_CLASS_DELETE_NOTIFY,
+            payload: payload.clone(),
+        });
+        assert_eq!(ev, NcEvent::ClassDeleted("Foo".into()));
+        let mut lists = NcLists::default();
+        lists.classes.push("Foo".into());
+        lists.classes.push("Bar".into());
+        lists.apply(&ev);
+        assert_eq!(lists.classes, ["Bar"]);
+        // A bare name is not read, and it does not drop a class.
+        let bare = parse_event(&Message {
             id: NC_CLASS_DELETE_NOTIFY,
             payload: b"Foo".to_vec(),
         });
-        assert_eq!(ev, NcEvent::ClassDeleteRaw(b"Foo".to_vec()));
-        let mut lists = NcLists::default();
-        lists.classes.push("Foo".into());
-        lists.apply(&ev);
-        assert_eq!(lists.classes, ["Foo"]);
+        assert!(matches!(bare, NcEvent::Message { id: 188, .. }));
+        lists.apply(&bare);
+        assert_eq!(lists.classes, ["Bar"]);
+        payload.push(b'x');
+        assert!(parse_class_delete(&payload).is_none());
     }
 
     #[test]

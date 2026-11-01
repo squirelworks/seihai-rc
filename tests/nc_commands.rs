@@ -13,8 +13,8 @@ use seihai_rc::link::Codec;
 use seihai_rc::nc::{
     npc_delete_message, npc_get_message, npc_script_get_message, npc_script_set_message,
     weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcSession,
-    NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET, NC_CLASS_NAME, NC_CLASS_SCRIPT, NC_CLASS_SET,
-    NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT, NC_WEAPON_NAMES,
+    NC_CLASS_DELETE, NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET, NC_CLASS_NAME, NC_CLASS_SCRIPT,
+    NC_CLASS_SET, NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT, NC_WEAPON_NAMES,
     NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
 };
 use seihai_rc::rc::{discover_npc_servers, LoginParams, RcKind};
@@ -469,7 +469,7 @@ fn npc_get_set_delete_and_script_round_trip() {
 }
 
 #[test]
-fn class_list_get_and_set_leave_delete_unsent() {
+fn class_list_get_set_and_delete() {
     let (addr, handle) = fake_nc(NcPlan::Push(vec![
         message(NC_CLASS_NAME, b"Guard"),
         message(NC_CLASS_DELETE_NOTIFY, b"Old"),
@@ -538,11 +538,54 @@ fn class_list_get_and_set_leave_delete_unsent() {
     assert_eq!(stdout(&output), "sent class Guard\n");
     handle.join().unwrap();
 
-    let output = cli(&["nc", "class", "delete", "Guard"]);
-    assert!(!output.status.success());
+    let mut name = Vec::new();
+    push_gstring(&mut name, b"Guard");
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: NC_CLASS_DELETE,
+        payload: name.clone(),
+        reply: vec![message(NC_CLASS_DELETE_NOTIFY, &name)],
+    });
+    let output = cli(&[
+        "nc",
+        "class",
+        "delete",
+        "Guard",
+        "--server",
+        &addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "deleted Guard\n");
+    assert_eq!(handle.join().unwrap()[0].payload, name);
+
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: NC_CLASS_DELETE,
+        payload: name,
+        reply: vec![message(NC_CLASS_DELETE_NOTIFY, b"Guard")],
+    });
+    let output = cli(&[
+        "nc",
+        "class",
+        "delete",
+        "Guard",
+        "--server",
+        &addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ]);
+    assert!(!output.status.success(), "{}", stdout(&output));
     let err = stderr(&output);
-    assert!(err.contains("still needs a lab check"), "{err}");
-    assert!(err.contains("119"), "{err}");
+    assert!(err.contains("bare class name"), "{err}");
+    handle.join().unwrap();
 }
 
 #[test]

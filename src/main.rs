@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use seihai_rc::listserver::{fetch_rc_list, pick};
+use seihai_rc::listserver::{decode_server_key, fetch_rc_list, fetch_rc_list_secure, pick};
 use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_delete_message,
     npc_get_message, npc_script_get_message, npc_script_set_message, weapon_delete_message,
@@ -31,7 +31,7 @@ USAGE:
   seihai-rc nc classes (--server ... | --discover ...) --account NAME
   seihai-rc nc class get NAME (--server ... | --discover ...) --account NAME
   seihai-rc nc class set NAME --script TEXT (--server ... | --discover ...) --account NAME
-  seihai-rc nc class delete NAME
+  seihai-rc nc class delete NAME (--server ... | --discover ...) --account NAME
   seihai-rc nc weapons (--server ... | --discover ...) --account NAME
   seihai-rc nc weapon get NAME (--server ... | --discover ...) --account NAME
   seihai-rc nc weapon set NAME --image IMG --script TEXT (--server ... | --discover ...)
@@ -53,15 +53,16 @@ USAGE:
                 delete removes the NPC (id 104) and waits for id 159.
   nc classes    List class names the NPC-server sends (id 163).
   nc class      get opens a class (id 112, reply 162). set saves it (id 113).
-                delete is not sent: the name's layout still needs a lab check.
+                delete sends id 119 (GSTRING name, as class set does) and
+                waits for id 188. A bare class name is not sent.
   nc weapons    Ask for the weapon list (id 115, reply 167).
   nc weapon     get opens a weapon (id 116, reply 33). set saves it (id 117).
                 delete sends id 118.
 
-  For every nc command except discover and class delete, --server is the
-  NPC-server. --discover is the game server: the client logs in there,
-  reads one id 79 address, and only then opens the NPC-Control socket.
-  Give one of those two, not both.
+  For every nc command except discover, --server is the NPC-server.
+  --discover is the game server: the client logs in there, reads one id 79
+  address, and only then opens the NPC-Control socket. Give one of those
+  two, not both.
 
 OPTIONS:
   --password-env VAR   Read the password from this environment variable
@@ -82,6 +83,11 @@ OPTIONS:
                        attributes. A script with a line break is not sent.
   --script-file PATH   Read the script from a file, instead of --script.
   --image NAME         Weapon image for weapon set.
+  --secure-login       Ask the listserver for the RC list through the
+                       secure handshake (id 5, token SEI00001). The account
+                       and password go sealed. Needs --server-key.
+  --server-key KEY     The listserver's Ed25519 public key, unpadded
+                       base64. The password is not sent if it does not match.
   --tsv                players list and nc npcs: tab-separated, with a header.
   -v, --verbose        Also show the ids of messages not printed as text.
   -V, --version        Print the version.
@@ -106,7 +112,9 @@ struct Opts {
     script: Option<String>,
     script_file: Option<String>,
     image: Option<String>,
+    server_key: Option<String>,
     script_flag: bool,
+    secure_login: bool,
     tsv: bool,
     verbose: bool,
 }
@@ -146,6 +154,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             }
             "--script-file" => o.script_file = Some(val!(&a)),
             "--image" => o.image = Some(val!(&a)),
+            "--server-key" => o.server_key = Some(val!(&a)),
+            "--secure-login" => o.secure_login = true,
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
             "--settle" => o.settle = Some(num(&a, val!(&a))?),
             "--for" => o.for_secs = Some(num(&a, val!(&a))?),
@@ -209,8 +219,7 @@ fn target(o: &Opts, c: &Common) -> Result<String, String> {
     match (&o.server, &o.listserver, &o.pick) {
         (Some(s), None, None) => Ok(s.clone()),
         (None, Some(ls), Some(which)) => {
-            let reply = fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
-                .map_err(|e| format!("{ls}: {e}"))?;
+            let reply = fetch_list(o, c, ls)?;
             let s = pick(&reply.servers, which).ok_or_else(|| {
                 format!("no single server matches {which:?} in the list from {ls}")
             })?;
@@ -265,11 +274,35 @@ fn print_event(ev: &Event, verbose: bool) {
     }
 }
 
+fn fetch_list(o: &Opts, c: &Common, ls: &str) -> Result<seihai_core::protocol::ListReply, String> {
+    let reply = if o.secure_login {
+        let text = o
+            .server_key
+            .as_deref()
+            .ok_or("--secure-login needs --server-key KEY")?;
+        let key =
+            decode_server_key(text).ok_or("--server-key is not an unpadded base64 Ed25519 key")?;
+        fetch_rc_list_secure(
+            ls,
+            &c.token,
+            &c.account,
+            &c.password,
+            c.key,
+            &key,
+            c.timeout,
+        )
+    } else if o.server_key.is_some() {
+        return Err("--server-key is only used with --secure-login".into());
+    } else {
+        fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
+    };
+    reply.map_err(|e| format!("{ls}: {e}"))
+}
+
 fn cmd_servers(o: &Opts) -> Result<(), String> {
     let c = common(o)?;
     let ls = o.listserver.as_deref().ok_or("--listserver is required")?;
-    let reply = fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
-        .map_err(|e| format!("{ls}: {e}"))?;
+    let reply = fetch_list(o, &c, ls)?;
     if let Some(st) = &reply.status {
         for line in st.lines() {
             eprintln!("{line}");
@@ -483,12 +516,7 @@ fn nc_verbose(event: &NcEvent) -> String {
     match event {
         NcEvent::Disconnect(why) => format!("[disconnected] {why}"),
         NcEvent::Message { id, payload } => format!("[nc] id {id} ({} bytes)", payload.len()),
-        NcEvent::ClassDeleteRaw(payload) => {
-            format!(
-                "[nc] id 188 ({} bytes, still needs a lab check)",
-                payload.len()
-            )
-        }
+        NcEvent::ClassDeleted(name) => format!("[class] deleted {name}"),
         NcEvent::Npc(row) => format!("[npc] {} arrived", row.id),
         NcEvent::NpcRemoved(id) => format!("[npc] {id} removed"),
         NcEvent::Attributes(_) => "[npc] attributes".into(),
@@ -508,9 +536,7 @@ fn seen(events: &[NcEvent]) -> String {
         .iter()
         .map(|event| match event {
             NcEvent::Message { id, payload } => format!("id {id} ({} bytes)", payload.len()),
-            NcEvent::ClassDeleteRaw(payload) => {
-                format!("id 188 ({} bytes, unparsed)", payload.len())
-            }
+            NcEvent::ClassDeleted(name) => format!("[class] deleted {name}"),
             other => nc_verbose(other),
         })
         .collect::<Vec<_>>()
@@ -726,10 +752,25 @@ fn cmd_nc_class_set(o: &Opts, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_nc_class_delete(name: &str) -> Result<(), String> {
-    class_delete_message(name)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+fn cmd_nc_class_delete(o: &Opts, name: &str) -> Result<(), String> {
+    let msg = class_delete_message(name).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let mut session = connect_nc(o, &c)?;
+    session.send(&[msg]).map_err(|e| e.to_string())?;
+    let events = settle_nc(&mut session, o, &c)?;
+    if events
+        .iter()
+        .any(|event| matches!(event, NcEvent::ClassDeleted(got) if got == name))
+    {
+        println!("deleted {name}");
+        session.close();
+        Ok(())
+    } else {
+        Err(format!(
+            "no class delete (id 188) for {name:?} arrived; a bare class name is not read. Saw {}",
+            seen(&events)
+        ))
+    }
 }
 
 fn cmd_nc_weapons(o: &Opts) -> Result<(), String> {
@@ -837,7 +878,7 @@ fn main() -> ExitCode {
         ["nc", "classes"] | ["nc", "class", "list"] => cmd_nc_classes(&o),
         ["nc", "class", "get", name] => cmd_nc_class_get(&o, name),
         ["nc", "class", "set", name] => cmd_nc_class_set(&o, name),
-        ["nc", "class", "delete", name] => cmd_nc_class_delete(name),
+        ["nc", "class", "delete", name] => cmd_nc_class_delete(&o, name),
         ["nc", "weapons"] | ["nc", "weapon", "list"] => cmd_nc_weapons(&o),
         ["nc", "weapon", "get", name] => cmd_nc_weapon_get(&o, name),
         ["nc", "weapon", "set", name] => cmd_nc_weapon_set(&o, name),

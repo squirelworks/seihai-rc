@@ -7,10 +7,11 @@
 //! line feeds, and [`crate::link::Link::send`] refuses a line feed inside an
 //! ordinary message, so the file bytes travel in a raw block.
 //!
-//! # Payload fields that still need a lab check
+//! # Payload fields
 //!
-//! Nothing below has been compared with the fork. Do not treat it as the
-//! gserver's layout until a loopback lab run says so.
+//! A loopback run against the gserver-v2 fork (2026-11-01,
+//! `docs/lab/2026-11-01-file-widths.md`) did not match this layout. The
+//! client still sends it. Do not treat it as what that fork sends.
 //!
 //! - List request, id [`pli::RC_FILEBROWSER_CD`] (90): one `GSTRING` path.
 //!   `""` means the world root. Whether id 89 `START` has to come first is

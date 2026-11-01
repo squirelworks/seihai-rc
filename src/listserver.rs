@@ -5,6 +5,10 @@
 //! 1. A plain zlib frame with id 5 = `GCHAR key` + the RC's 8-byte token.
 //! 2. A gen-5 frame with id 1 = `GSTRING account` + `GSTRING password`.
 //!
+//! The secure form ([`fetch_rc_list_secure`]) uses the same id 5 and the
+//! same reply. The account goes in C2 instead of a gen-5 id 1. See
+//! `docs/PROTOCOL.md`.
+//!
 //! The listserver answers with gen-5 frames: id 0 the server list (as for
 //! the 2.22 client list, names carrying a type tag such as `P ` or `H `),
 //! then id 2 status, id 3 site URL and id 5 upgrade URL. A refused login
@@ -13,10 +17,11 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use seihai_core::protocol::{parse_list_reply, ListReply, ServerEntry};
+use seihai_core::protocol::seclogin::{self, ClientHandshake};
+use seihai_core::protocol::{parse_list_reply, split_messages, ListReply, ServerEntry};
 
 use crate::link::{Codec, Link};
-use crate::wire::{gchar, latin1_bytes, message, push_gstring};
+use crate::wire::{gchar, latin1_bytes, message, push_gstring, text};
 
 /// Client to listserver: RC list handshake (key + token).
 pub const PLI_V2SERVERLISTRC: u8 = 5;
@@ -49,6 +54,9 @@ pub enum ListError {
     Refused(String),
     /// No list came before the link closed or the timeout passed.
     NoList,
+    /// The secure handshake failed, or the pinned key did not match.
+    /// Nothing after C1 was sent when the key did not match.
+    Secure(String),
 }
 
 impl std::fmt::Display for ListError {
@@ -57,6 +65,7 @@ impl std::fmt::Display for ListError {
             ListError::Io(e) => write!(f, "{e}"),
             ListError::Refused(why) => write!(f, "listserver refused the login: {why}"),
             ListError::NoList => write!(f, "the listserver sent no server list"),
+            ListError::Secure(why) => write!(f, "{why}"),
         }
     }
 }
@@ -85,6 +94,96 @@ pub fn fetch_rc_list(
     let mut link = Link::connect(addr, timeout)?;
     link.send_login(&handshake_body(key, token), Codec::gen5(key & 0x7F))?;
     link.send(&[account_message(account, password)])?;
+    let reply = read_reply(&mut link, deadline);
+    link.shutdown();
+    reply
+}
+
+/// The id 1 payload sealed in C2: `GSTRING` account, `GSTRING` password.
+/// The id byte itself stays out; it already went in the classic message.
+fn account_tail(account: &str, password: &str) -> Vec<u8> {
+    let mut tail = Vec::new();
+    push_gstring(&mut tail, &latin1_bytes(account));
+    push_gstring(&mut tail, &latin1_bytes(password));
+    tail
+}
+
+/// An unpadded base64 Ed25519 public key, as `--server-key` prints it.
+pub fn decode_server_key(text: &str) -> Option<[u8; 32]> {
+    seclogin::decode_key(text)
+}
+
+/// Log in through the secure handshake and read the RC server list.
+///
+/// C1 is a plain zlib frame: id 5, the key byte, `SEI00001`, the RC token,
+/// the client's X25519 key. There is no list name after that. C2 is a
+/// second plain zlib frame sealing [`account_tail`]. The player-list form
+/// (id 7 and a list name) is not sent. After C2 the link is gen 5 with
+/// `key`, and the reply is the same one [`fetch_rc_list`] reads.
+///
+/// `server_key` is the listserver's Ed25519 public key. On a mismatch this
+/// returns [`ListError::Secure`] and does not send C2.
+pub fn fetch_rc_list_secure(
+    addr: &str,
+    token: &str,
+    account: &str,
+    password: &str,
+    key: u8,
+    server_key: &[u8; 32],
+    timeout: Duration,
+) -> Result<ListReply, ListError> {
+    let deadline = Instant::now() + timeout;
+    let key = key & 0x7F;
+    let mut link = Link::connect(addr, timeout)?;
+    let prefix = [gchar(PLI_V2SERVERLISTRC), gchar(key)];
+    let handshake =
+        ClientHandshake::new(&prefix, token, b"").map_err(|e| ListError::Secure(e.to_string()))?;
+    let mut c1 = handshake.hello().to_vec();
+    c1.push(b'\n');
+    link.send_plain(&c1)?;
+    let Some(body) = link.recv_body(deadline)? else {
+        link.shutdown();
+        return Err(ListError::NoList);
+    };
+    let line = body
+        .split(|b| *b == b'\n')
+        .next()
+        .unwrap_or(body.as_slice());
+    if !line.starts_with(seclogin::TOKEN.as_bytes()) {
+        let refused = split_messages(&body).into_iter().find(|m| m.id == 4);
+        link.shutdown();
+        return match refused {
+            Some(m) => Err(ListError::Refused(text(&m.payload))),
+            None => Err(ListError::Secure(
+                "the listserver did not send a secure hello".into(),
+            )),
+        };
+    }
+    let verified = handshake
+        .finish(line)
+        .map_err(|e| ListError::Secure(e.to_string()))?;
+    if verified.server_key != *server_key {
+        link.shutdown();
+        return Err(ListError::Secure(format!(
+            "server key {} is not the given key {}; not sending the password",
+            seclogin::fingerprint(&verified.server_key),
+            seclogin::fingerprint(server_key),
+        )));
+    }
+    let mut c2 = verified
+        .sealer
+        .seal(&account_tail(account, password))
+        .map_err(|e| ListError::Secure(e.to_string()))?;
+    c2.push(b'\n');
+    link.send_plain(&c2)?;
+    link.set_codec(Codec::gen5(key));
+    let reply = read_reply(&mut link, deadline);
+    link.shutdown();
+    reply
+}
+
+/// Read the gen-5 RC list. The link is already on that codec.
+fn read_reply(link: &mut Link, deadline: Instant) -> Result<ListReply, ListError> {
     let mut reply = ListReply::default();
     let mut got_list = false;
     let quiet = Duration::from_millis(300);
@@ -107,11 +206,9 @@ pub fn fetch_rc_list(
         reply.site_url = part.site_url.or(reply.site_url);
         reply.upgrade_url = part.upgrade_url.or(reply.upgrade_url);
         if let Some(err) = part.error {
-            link.shutdown();
             return Err(ListError::Refused(err));
         }
     }
-    link.shutdown();
     if got_list {
         Ok(reply)
     } else {
