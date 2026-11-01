@@ -95,8 +95,11 @@ may still show an extra byte; until that run, this client does not add one.
 The staff client treats the socket as connected once the login frame is
 written. `nc login` does the same when the link stays open. Id 16
 (`DISCMESSAGE`, text) during that wait is a refusal and the command fails.
-Later id 16 lines are printed as `[disconnected]`. Large raw uploads (id 50
-out, id 100 in) are not handled.
+Later id 16 lines are printed as `[disconnected]`. An id this client does not
+parse is printed as `[nc] id N (L bytes)`. Large raw uploads (id 50
+out, id 100 in) are not handled on the NPC-Control socket. The file link
+below uses those two ids on the RC socket, because a file may contain line
+feeds and an ordinary message may not.
 
 ### Finding the NPC-server
 
@@ -154,3 +157,39 @@ Still needs a lab check, and so is not turned into fields:
 - Id 33 when the GSHORT length runs past the message. A GINT3 length for a large script still needs a lab check and is not tried. A script byte that is a line feed still needs a lab check: the frame reader stops at a line feed.
 - Each id 167 replaces the stored weapon list. Whether a second one is a full list or an addition still needs a lab check. The notes describe the packet as the list, so this client treats each one as the whole list.
 - Attribute text, class names and scripts are the rest of the one message that carried them. A line feed inside that text still needs a lab check.
+
+## File link (list, get, put)
+
+Ids are the file-browser ids named under stage 4 in `docs/NEXT.md`. This
+repo does not describe their payloads. The layout below is the smallest one
+that fits the codec already in this crate: `GSTRING` for a path or a name,
+`GSHORT` for a count, `GINT3` for a byte count, and a raw block so the file
+bytes may contain `\n`.
+
+A raw block is the shape `split_messages` already uses for id 100: `GCHAR`
+id, `GINT3` byte count, `\n`, then that many bytes (the next message, id
+included, line feeds allowed). Inbound files use id 100, so `Link::recv`
+keeps them intact. Outbound files use id 50, the outbound raw id named in
+the NPC-Control section above. `split_messages` does not treat id 50 as
+raw; the sender builds the block itself.
+
+Every payload field below still needs a lab check against the fork. Until
+that run, do not treat this layout as what a gserver sends.
+
+| | Id | Payload, lab-unconfirmed |
+|---|---:|---|
+| List | 90 `RC_FILEBROWSER_CD` | `GSTRING` path. `""` is the world root. Id 89 `START` is not sent. |
+| Names | 65 `RC_FILEBROWSER_DIRLIST` | `GSHORT` count, then that many `GSTRING` names. No size, no directory flag. |
+| Get | 92 `RC_FILEBROWSER_DOWN` | `GSTRING` path. |
+| File | 100 raw, then 66 `RC_FILEBROWSER_DIR` | `GSTRING` name, `GINT3` size, then that many bytes. |
+| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | same name, `GINT3` size, and bytes as the file row. |
+| Refusal | 67 `RC_FILEBROWSER_MESSAGE` | the text. |
+
+Not sent, layouts unknown: 89 `START`, 91 `END`, 96 move, 97 delete, 98
+rename, 155/156 large file, 160 folder delete. A file longer than 60 KiB
+is refused. One frame's length is a `u16`, and those large-file ids are
+how a bigger file would have to travel once a lab run shows their layout.
+
+Paths are relative, `/`-separated. `..`, a leading `/`, a backslash and a
+colon are refused. A `GSTRING` holds at most 223 bytes, so a longer path
+is refused rather than cut.

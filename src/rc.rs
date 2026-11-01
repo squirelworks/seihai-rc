@@ -400,9 +400,9 @@ impl From<io::Error> for LoginError {
 
 /// A logged-in RC session.
 pub struct Session {
-    link: Link,
+    pub(crate) link: Link,
     /// Events read during login that the caller has not taken yet.
-    pending: Vec<Event>,
+    pub(crate) pending: Vec<Event>,
     pub players: PlayerList,
 }
 

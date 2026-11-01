@@ -11,9 +11,12 @@ Part of the Seihai server stack:
 client: [seihai](https://github.com/squirelworks/seihai).
 
 **Status: command line.** Log in directly or through the listserver's RC
-list, watch the RC chat, and list the players online. NPC Control can find
-the NPC-server from the game server and then list, get, set and delete
-NPCs, classes and weapons. The plan is in
+list, watch the RC chat, and list the players online. `nc login` opens the
+separate NPC-server socket (type 3, plain zlib) when you already know its
+address. NPC Control can also find the NPC-server from the game server and
+then list, get, set and delete NPCs, classes and weapons. A live level
+editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
+session; there is no file window in this slice. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
 [docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the ordered to-do list in
@@ -36,6 +39,9 @@ seihai-rc players list --listserver 127.0.0.1:14922 --pick "My Server" --account
 
 # Log in and print the RC chat and joins for 30 seconds
 seihai-rc login --server 127.0.0.1:14802 --account myrc --nick "My RC" --for 30
+
+# NPC-Control socket, when its address is already known (lab port 14804)
+seihai-rc nc login --server 127.0.0.1:14804 --account myrc --for 30
 
 # NPC-server address from the game server, then the lists on that socket
 seihai-rc nc discover --server 127.0.0.1:14802 --account myrc

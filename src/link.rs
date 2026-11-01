@@ -45,7 +45,19 @@ impl Codec {
     /// frame, length included.
     pub fn encode(&mut self, body: &[u8]) -> io::Result<Vec<u8>> {
         match self {
-            Codec::Plain => write_zlib_frame(body),
+            Codec::Plain => {
+                let frame = write_zlib_frame(body)?;
+                // `write_zlib_frame` stores the length as a u16. A compressed
+                // body that does not fit would be truncated; refuse it.
+                let n = usize::from(u16::from_be_bytes([frame[0], frame[1]]));
+                if frame.len() != 2 + n {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "frame too long",
+                    ));
+                }
+                Ok(frame)
+            }
             Codec::Gen5 { out, .. } => {
                 // Short bodies go uncompressed, as the clients send them;
                 // bz2 is never needed for what an RC sends.
@@ -151,6 +163,17 @@ impl Link {
         self.stream.flush()
     }
 
+    /// Send a frame body that is already complete, including any raw block.
+    ///
+    /// Unlike [`Self::send`], `body` may contain line feeds. A file upload
+    /// needs that: the bytes sit in a length-prefixed raw block, and a level
+    /// file contains line feeds.
+    pub fn send_body(&mut self, body: &[u8]) -> io::Result<()> {
+        let frame = self.codec.encode(body)?;
+        self.stream.write_all(&frame)?;
+        self.stream.flush()
+    }
+
     /// True once the peer has closed the link.
     pub fn is_closed(&self) -> bool {
         self.closed
@@ -243,5 +266,25 @@ mod tests {
         let mut c = Codec::Plain;
         let frame = c.encode(b"!hello\n").unwrap();
         assert_eq!(c.decode(&frame[2..]).unwrap(), b"!hello\n");
+    }
+
+    #[test]
+    fn plain_frame_over_u16_is_rejected() {
+        // A counter compresses. Mix each index so the zlib form cannot
+        // fit in a u16 length.
+        let body: Vec<u8> = (0u32..120_000)
+            .map(|i| {
+                let mut x = i.wrapping_add(0x9E37_79B9);
+                x = x.wrapping_mul(0x85EB_CA6B);
+                x ^= x >> 13;
+                x = x.wrapping_mul(0xC2B2_AE35);
+                x ^= x >> 16;
+                x as u8
+            })
+            .collect();
+        let mut c = Codec::Plain;
+        let err = c.encode(&body).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(err.to_string(), "frame too long");
     }
 }

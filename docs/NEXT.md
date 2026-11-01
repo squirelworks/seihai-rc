@@ -55,6 +55,14 @@ folder config (53/54) → 77; server flags (68/69) → 61; file browser
 Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
 (`remotecontrol-lineage.md`).
 
+- [x] File link: list, get, put (`Session::list_dir`, `get_file`, `put_file`).
+      No window and no `files` command line in this slice. Payload fields are
+      still a lab check; see `docs/PROTOCOL.md`. Evidence: fake gserver on an
+      ephemeral loopback port in `tests/file_link.rs`. No real client. The
+      fork was not run (lab pack not available).
+- [ ] Server options, folder config, flags, move / delete / rename, folder
+      delete (160), large-file packets (155/156).
+
 ## Stage 5: NPC Control
 
 Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
