@@ -7,9 +7,12 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use std::process::Command;
+
+use seihai_core::protocol::seclogin::{self, ClientHello, ServerIdentity};
 use seihai_core::protocol::{split_messages, zlib_decompress, Message};
 use seihai_rc::link::Codec;
-use seihai_rc::listserver::{fetch_rc_list, pick, ListError};
+use seihai_rc::listserver::{fetch_rc_list, fetch_rc_list_secure, pick, ListError};
 use seihai_rc::rc::{Event, LoginError, LoginParams, RcKind, Session};
 use seihai_rc::wire::{gchar, message, push_gstring};
 
@@ -326,6 +329,192 @@ fn rc_list_from_listserver() {
     assert_eq!(account.len(), 1);
     assert_eq!(account[0].id, 1);
     assert_eq!(account[0].payload, b"%labrc%labpw");
+}
+
+struct SecureSeen {
+    c1: Vec<u8>,
+    /// C2's line, when one arrived. `None` when the client sent nothing
+    /// after the hello.
+    c2: Option<Vec<u8>>,
+    opened: Option<Vec<u8>>,
+}
+
+/// A fake listserver for the secure RC list. `refuse` sends id 4 instead
+/// of S1. Otherwise it answers C1, opens C2, and sends the same list as
+/// [`fake_listserver`].
+fn fake_secure_listserver(refuse: bool) -> (String, [u8; 32], thread::JoinHandle<SecureSeen>) {
+    let identity = ServerIdentity::generate();
+    let public = identity.public_key();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let c1 = zlib_decompress(&read_raw_frame(&mut stream)).unwrap();
+        let line = c1.split(|b| *b == b'\n').next().unwrap_or(&c1);
+        if refuse {
+            let mut codec = Codec::Plain;
+            send_msgs(
+                &mut stream,
+                &mut codec,
+                &[message(4, b"Account does not exist.")],
+            );
+            return SecureSeen {
+                c1,
+                c2: None,
+                opened: None,
+            };
+        }
+        let hello = ClientHello::parse(line, 2).unwrap().unwrap();
+        assert_eq!(
+            hello.prefix[0].wrapping_sub(0x20),
+            5,
+            "RC list id, not id 7"
+        );
+        assert_eq!(hello.inner_token(), "GSERV025");
+        assert!(hello.suffix.is_empty(), "an RC list sends no list name");
+        let (s1, opener) = hello.respond(&identity).unwrap();
+        let mut codec = Codec::Plain;
+        let mut body = s1;
+        body.push(b'\n');
+        stream.write_all(&codec.encode(&body).unwrap()).unwrap();
+        stream.flush().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(800)))
+            .unwrap();
+        let c2 = match read_raw_frame_timeout(&mut stream) {
+            Some(frame) => Some(zlib_decompress(&frame).unwrap()),
+            None => {
+                return SecureSeen {
+                    c1,
+                    c2: None,
+                    opened: None,
+                };
+            }
+        };
+        let c2_line = c2
+            .as_deref()
+            .and_then(|b| b.split(|byte| *byte == b'\n').next())
+            .unwrap_or_default();
+        let opened = opener.open(c2_line).ok();
+        let key = hello.prefix[1].wrapping_sub(0x20);
+        let mut gen5 = Codec::gen5(key);
+        let mut list = vec![gchar(0), gchar(1)];
+        list.push(gchar(8));
+        for field in [
+            "H My Server",
+            "English",
+            "lab",
+            "",
+            "4.0.0-beta",
+            "0",
+            "127.0.0.1",
+            "14802",
+        ] {
+            push_gstring(&mut list, field.as_bytes());
+        }
+        send_msgs(&mut stream, &mut gen5, &[list]);
+        send_msgs(
+            &mut stream,
+            &mut gen5,
+            &[message(2, b"Welcome."), message(3, b""), message(5, b"")],
+        );
+        SecureSeen { c1, c2, opened }
+    });
+    (addr, public, handle)
+}
+
+fn read_raw_frame_timeout(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut len = [0u8; 2];
+    if stream.read_exact(&mut len).is_err() {
+        return None;
+    }
+    let mut frame = vec![0u8; usize::from(u16::from_be_bytes(len))];
+    stream.read_exact(&mut frame).ok()?;
+    Some(frame)
+}
+
+#[test]
+fn secure_rc_list_seals_the_account_and_reads_id_5() {
+    let (addr, public, handle) = fake_secure_listserver(false);
+    let reply =
+        fetch_rc_list_secure(&addr, "GSERV025", "labrc", "labpw", 0x11, &public, TIMEOUT).unwrap();
+    assert_eq!(reply.servers.len(), 1);
+    assert_eq!(reply.servers[0].kind, "H");
+    assert_eq!(reply.servers[0].name, "My Server");
+    assert_eq!(reply.status.as_deref(), Some("Welcome."));
+    let seen = handle.join().unwrap();
+    let c1 = seen.c1;
+    // id 5, key 0x11, SEI00001, the RC token, 43-byte key, line feed.
+    // No list name and no account: a longer line would be the player-list
+    // form or the password in the clear.
+    assert_eq!(c1.len(), 2 + 8 + 8 + 43 + 1, "{c1:?}");
+    assert_eq!(&c1[..2], &[gchar(5), gchar(0x11)]);
+    assert_eq!(&c1[2..18], b"SEI00001GSERV025");
+    assert_eq!(*c1.last().unwrap(), b'\n');
+    let c2 = seen.c2.expect("C2 was sent");
+    assert!(c2.starts_with(seclogin::TOKEN.as_bytes()), "{c2:?}");
+    let mut tail = Vec::new();
+    push_gstring(&mut tail, b"labrc");
+    push_gstring(&mut tail, b"labpw");
+    assert_eq!(seen.opened.unwrap(), tail);
+}
+
+#[test]
+fn secure_rc_list_does_not_send_the_password_for_the_wrong_key() {
+    let (addr, _public, handle) = fake_secure_listserver(false);
+    let other = ServerIdentity::generate().public_key();
+    match fetch_rc_list_secure(&addr, "GSERV025", "labrc", "labpw", 0x11, &other, TIMEOUT) {
+        Err(ListError::Secure(why)) => {
+            assert!(why.contains("not sending the password"), "{why}");
+        }
+        other => panic!("wrong result: {other:?}"),
+    }
+    let seen = handle.join().unwrap();
+    assert!(
+        seen.c2.is_none(),
+        "C2 must not be sent when the key does not match"
+    );
+}
+
+#[test]
+fn secure_rc_list_reports_a_refusal() {
+    let (addr, public, handle) = fake_secure_listserver(true);
+    match fetch_rc_list_secure(&addr, "GSERV025", "nobody", "x", 0x11, &public, TIMEOUT) {
+        Err(ListError::Refused(why)) => assert_eq!(why, "Account does not exist."),
+        other => panic!("wrong result: {other:?}"),
+    }
+    handle.join().unwrap();
+}
+
+#[test]
+fn servers_command_uses_the_secure_handshake() {
+    let (addr, public, handle) = fake_secure_listserver(false);
+    let output = Command::new(env!("CARGO_BIN_EXE_seihai-rc"))
+        .args([
+            "servers",
+            "--listserver",
+            &addr,
+            "--account",
+            "labrc",
+            "--secure-login",
+            "--server-key",
+            &seclogin::encode_key(&public),
+            "--timeout",
+            "5",
+        ])
+        .env("SEIHAI_RC_PASSWORD", "labpw")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("My Server"), "{stdout}");
+    let seen = handle.join().unwrap();
+    assert!(seen.c2.is_some());
 }
 
 #[test]

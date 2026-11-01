@@ -73,6 +73,28 @@ then id 2 status (`\r` = new line), id 3 site URL, id 5 upgrade URL. Names carry
 a type tag (`P `, `H `, `3 `, `U `; none for classic). A refused login gets id 4
 with the reason and the link closes.
 
+### Secure handshake
+
+`--secure-login` with `--server-key` asks for this same list without the
+account or password in the clear. The handshake is Seihai's `SEI00001`
+(`documentation/secure-login.md` in the seihai repo). What this client
+sends:
+
+1. Plain zlib C1: id 5, GCHAR key, `SEI00001`, the RC token (the same eight
+   bytes as the classic handshake), the client's X25519 key. No list name.
+2. Plain zlib S1 from the listserver. The signature is checked. If
+   `--server-key` is not that key, the client stops and sends nothing more.
+3. Plain zlib C2: `SEI00001` and the sealed id 1 payload (`GSTRING` account,
+   `GSTRING` password). The id byte is not inside the seal.
+
+After C2 both sides start gen 5 from the key in C1. The client sends no
+gen-5 frame of its own before the reply. The reply is the list above (id 0,
+then id 2, id 3 and id 5, or id 4).
+
+The player-list form (id 7, and a list name such as `newmain` after the
+client key) is not sent. A listserver that only treats id 7 as `SEI00001`
+will not answer this client.
+
 ## NPC Control
 
 A second socket from the RC game-server link. Layouts follow the behaviour
@@ -142,7 +164,7 @@ client waits `--settle` ms and reads what arrived.
 | Class list | (none) | 163 `NC_CLASSADD`: the rest of the line is one class name |
 | Class get | 112 `NC_CLASSEDIT`: the class name as the rest of the line | 162 `NC_CLASSGET`: GSTRING name, then the script |
 | Class set | 113 `NC_CLASSADD`: GSTRING name, then the script | no reply id is named |
-| Class delete | 119 is not sent | 188 is not parsed |
+| Class delete | 119 `NC_CLASSDELETE`: GSTRING name, the same string form as class set | 188: GSTRING name, and only when that string is the whole payload |
 | Weapon list | 115 `NC_WEAPONLISTGET`: no payload | 167: repeated GSTRING names |
 | Weapon get | 116 `NC_WEAPONGET`: the weapon name as the rest of the line | 33: GSTRING name, GSTRING image, GSHORT length, then that many script bytes |
 | Weapon set | 117: GSTRING name, GSTRING image, then the script | no reply id is named |
@@ -152,7 +174,7 @@ Still needs a lab check, and so is not turned into fields:
 
 - Id 158 with a property other than 50, 51 or 52. The whole payload stays raw. Whether a missing property clears a value already stored also still needs a lab check; this client leaves the stored value.
 - Id 159 with bytes after the GINT3.
-- Id 188, and client id 119. The notes still disagree on a bare class name versus a length-prefixed string. `nc class delete` prints that and sends nothing.
+- A bare class name (the rest of the line, as id 112 sends) for id 119 and id 188. Id 119 sends a GSTRING, the same string form as id 113's name, and id 188 is read only as that GSTRING. The bare name is not sent and not read.
 - Ids 112, 116 and 118. The notes write `str` where a length byte was seen, and they do not write it for these three, so this client sends the name as the rest of the line. A lab check should confirm there is no length byte.
 - Id 33 when the GSHORT length runs past the message. A GINT3 length for a large script still needs a lab check and is not tried. A script byte that is a line feed still needs a lab check: the frame reader stops at a line feed.
 - Each id 167 replaces the stored weapon list. Whether a second one is a full list or an addition still needs a lab check. The notes describe the packet as the list, so this client treats each one as the whole list.
@@ -173,8 +195,20 @@ keeps them intact. Outbound files use id 50, the outbound raw id named in
 the NPC-Control section above. `split_messages` does not treat id 50 as
 raw; the sender builds the block itself.
 
-Every payload field below still needs a lab check against the fork. Until
-that run, do not treat this layout as what a gserver sends.
+A loopback run against the gserver-v2 fork on 2026-11-01 (`docs/lab/2026-11-01-file-widths.md`)
+did not match this layout. The client still sends the widths below. What
+the fork did with those bytes:
+
+- Id 90 (`""` and `world`) got no reply.
+- Id 92's path was logged with the length byte as the first character of
+  the path (`9` in front of a 25-byte path). The reply was id 102, not id
+  66 inside id 100: 6 bytes, then the name `onlinestartlocal.nw` with no
+  length byte, then the level bytes. No GINT3 size.
+- Id 93's name was taken (the log names `rc-probe.txt`). The stored file
+  began with the three GINT3 size bytes and then the file. The reply was
+  id 67, `Uploaded file rc-probe.txt`.
+
+Do not treat the table as what that fork sends.
 
 | | Id | Payload, lab-unconfirmed |
 |---|---:|---|

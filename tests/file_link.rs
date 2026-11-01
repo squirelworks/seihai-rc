@@ -84,14 +84,33 @@ struct Seen {
     puts: Vec<(String, Vec<u8>)>,
 }
 
-fn gstring_text(payload: &[u8]) -> String {
+/// One sent `GSTRING`: a single length byte, then that many bytes, and
+/// nothing after. A `GSHORT` length would be two bytes and fail this.
+fn one_gstring(payload: &[u8]) -> String {
+    assert!(!payload.is_empty(), "a GSTRING length is one byte");
+    let n = usize::from(payload[0].wrapping_sub(0x20));
+    assert!(n <= 223, "GSTRING length is a GCHAR, got {n}");
+    assert_eq!(
+        payload.len(),
+        1 + n,
+        "sent path is one GSTRING (1 length byte + {n} bytes), not a longer count"
+    );
     let mut i = 0;
-    text(&read_gstring(payload, &mut i).unwrap())
+    let raw = read_gstring(payload, &mut i).unwrap();
+    assert_eq!(i, payload.len());
+    text(&raw)
 }
 
 fn take_put(payload: &[u8]) -> (String, Vec<u8>) {
+    assert!(!payload.is_empty(), "put name length is one byte");
     let mut i = 0;
-    let name = read_gstring(payload, &mut i).unwrap();
+    let name = read_gstring(payload, &mut i).expect("put name is a GSTRING");
+    assert_eq!(i, 1 + name.len(), "name length is one byte, not a GSHORT");
+    assert!(
+        payload.len() >= i + 3,
+        "put size is a GINT3 (three bytes), got {} after the name",
+        payload.len().saturating_sub(i)
+    );
     let size = read_gint3(&payload[i..i + 3]).unwrap();
     i += 3;
     assert_eq!(payload.len(), i + size, "put size does not match");
@@ -114,7 +133,7 @@ fn split_client_raw(body: &[u8]) -> (u8, Vec<u8>) {
 fn reply(m: &Message, seen: &mut Seen) -> Option<Vec<u8>> {
     match m.id {
         90 => {
-            let dir = gstring_text(&m.payload);
+            let dir = one_gstring(&m.payload);
             seen.lists.push(dir.clone());
             Some(match dir.as_str() {
                 "" => dir_list_body(&["levels"]),
@@ -124,7 +143,7 @@ fn reply(m: &Message, seen: &mut Seen) -> Option<Vec<u8>> {
             })
         }
         92 => {
-            let path = gstring_text(&m.payload);
+            let path = one_gstring(&m.payload);
             seen.gets.push(path.clone());
             Some(match path.as_str() {
                 "levels/a.nw" => file_reply("levels/a.nw", LEVEL),

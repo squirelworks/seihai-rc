@@ -14,7 +14,9 @@ client: [seihai](https://github.com/squirelworks/seihai).
 list, watch the RC chat, and list the players online. `nc login` opens the
 separate NPC-server socket (type 3, plain zlib) when you already know its
 address. NPC Control can also find the NPC-server from the game server and
-then list, get, set and delete NPCs, classes and weapons. A live level
+then list, get, set and delete NPCs, classes and weapons, including class
+delete. `servers --secure-login` asks the listserver for the RC list with
+the account sealed. A live level
 editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
 session; there is no file window in this slice. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
@@ -32,6 +34,8 @@ export SEIHAI_RC_PASSWORD=...
 
 # Servers on the listserver's RC list
 seihai-rc servers --listserver 127.0.0.1:14922 --account myrc
+seihai-rc servers --listserver 127.0.0.1:14922 --account myrc \
+  --secure-login --server-key KEY
 
 # Players online, direct or picked from the RC list (by number or name)
 seihai-rc players list --server 127.0.0.1:14802 --account myrc
@@ -47,6 +51,7 @@ seihai-rc nc login --server 127.0.0.1:14804 --account myrc --for 30
 seihai-rc nc discover --server 127.0.0.1:14802 --account myrc
 seihai-rc nc npcs --discover 127.0.0.1:14802 --account myrc --tsv
 seihai-rc nc npc get 12 --server 127.0.0.1:14804 --account myrc
+seihai-rc nc class delete Guard --server 127.0.0.1:14804 --account myrc
 seihai-rc nc weapons --server 127.0.0.1:14804 --account myrc
 ```
 
