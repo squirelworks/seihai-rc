@@ -10,10 +10,12 @@ Part of the Seihai server stack:
 [seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) (GPL fork of GServer-v2, ships first) ·
 client: [seihai](https://github.com/squirelworks/seihai).
 
-**Status: stage 1, command line only, plus an NPC-Control login.** Log in
-directly or through the listserver's RC list, watch the RC chat, list the
-players online. `nc login` opens the separate NPC-server socket (type 3,
-plain zlib) when you already know its address. The plan is in
+**Status: stage 1, command line only, plus an NPC-Control login and the file
+link.** Log in directly or through the listserver's RC list, watch the RC
+chat, list the players online. `nc login` opens the separate NPC-server
+socket (type 3, plain zlib) when you already know its address. A live level
+editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
+session; there is no file window in this slice. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
 [docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the ordered to-do list in
