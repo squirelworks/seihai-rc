@@ -190,6 +190,75 @@ fn events_keep_server_order() {
     h.join().unwrap();
 }
 
+/// Signature, then ADDPLAYER, the same id with new props, DELPLAYER, and
+/// ADDPLAYER again. The resend is what the fork does when props change.
+fn fake_gserver_resend() -> (String, thread::JoinHandle<()>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let h = thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        s.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let login = zlib_decompress(&read_raw_frame(&mut s)).unwrap();
+        let mut codec = Codec::gen5(login[1] - 0x20);
+        send_msgs(&mut s, &mut codec, &[message(25, &[gchar(73)])]);
+        let gap = Duration::from_millis(40);
+        thread::sleep(gap);
+        send_msgs(
+            &mut s,
+            &mut codec,
+            &[addplayer(6, "test205", "onlinestartlocal.nw", "default")],
+        );
+        thread::sleep(gap);
+        send_msgs(
+            &mut s,
+            &mut codec,
+            &[addplayer(6, "test205", "cave.nw", "Ally")],
+        );
+        thread::sleep(gap);
+        send_msgs(&mut s, &mut codec, &[message(56, &[gchar(0), gchar(6)])]);
+        thread::sleep(gap);
+        send_msgs(
+            &mut s,
+            &mut codec,
+            &[addplayer(6, "test205", "onlinestartlocal.nw", "default")],
+        );
+        let mut rest = Vec::new();
+        let _ = s.read_to_end(&mut rest);
+    });
+    (addr, h)
+}
+
+#[test]
+fn repeated_addplayer_is_an_update() {
+    let (addr, h) = fake_gserver_resend();
+    let mut s = Session::login(&addr, &params(RcKind::Gen5), TIMEOUT).unwrap();
+    let evs = s
+        .settle(Duration::from_millis(300), Instant::now() + TIMEOUT)
+        .unwrap();
+    let got: Vec<(&str, &str, &str)> = evs
+        .iter()
+        .filter_map(|ev| match ev {
+            Event::AddPlayer(e) => Some(("online", e.level.as_str(), e.nickname.as_str())),
+            Event::UpdatePlayer(e) => Some(("update", e.level.as_str(), e.nickname.as_str())),
+            Event::DelPlayer(6) => Some(("offline", "", "")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("online", "onlinestartlocal.nw", "default"),
+            ("update", "cave.nw", "Ally"),
+            ("offline", "", ""),
+            ("online", "onlinestartlocal.nw", "default"),
+        ]
+    );
+    assert_eq!(s.players.players[&6].level, "onlinestartlocal.nw");
+    assert_eq!(s.players.players[&6].nickname, "default");
+    s.close();
+    h.join().unwrap();
+}
+
 type ListSeen = (Vec<u8>, Vec<Message>);
 
 /// A fake listserver answering the RC list the way the lab listserver does.

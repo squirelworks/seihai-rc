@@ -173,6 +173,16 @@ fn login(o: &Opts, c: &Common) -> Result<(Session, String), String> {
     Ok((s, addr))
 }
 
+/// One `login` line for an arrival or a props refresh.
+fn player_line(tag: &str, e: &PlayerEntry) -> String {
+    format!(
+        "[{tag}] {} {} ({})",
+        e.id,
+        e.account,
+        if e.is_rc() { "RC" } else { e.level.as_str() }
+    )
+}
+
 fn print_event(ev: &Event, verbose: bool) {
     match ev {
         Event::Signature => {}
@@ -180,12 +190,8 @@ fn print_event(ev: &Event, verbose: bool) {
         Event::RcChat(line) => println!("[rc] {line}"),
         Event::AdminMessage(m) => println!("[admin] {}", m.replace('\u{a7}', ": ")),
         Event::PrivateMessage { from, text } => println!("[pm from {from}] {text}"),
-        Event::AddPlayer(e) => println!(
-            "[online] {} {} ({})",
-            e.id,
-            e.account,
-            if e.is_rc() { "RC" } else { e.level.as_str() }
-        ),
+        Event::AddPlayer(e) => println!("{}", player_line("online", e)),
+        Event::UpdatePlayer(e) => println!("{}", player_line("update", e)),
         Event::DelPlayer(id) => println!("[offline] {id}"),
         Event::Other(id, p) if verbose => eprintln!("[id {id}] {} bytes", p.len()),
         Event::Other(..) => {}
@@ -391,6 +397,32 @@ mod tests {
     #[test]
     fn rejects_unknown_option() {
         assert!(parse_args(args("login --password secret")).is_err());
+    }
+
+    #[test]
+    fn login_lines_distinguish_arrival_and_update() {
+        let player = PlayerEntry {
+            id: 6,
+            account: "test205".into(),
+            level: "cave.nw".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            player_line("online", &player),
+            "[online] 6 test205 (cave.nw)"
+        );
+        assert_eq!(
+            player_line("update", &player),
+            "[update] 6 test205 (cave.nw)"
+        );
+        let rc = PlayerEntry {
+            id: 5,
+            account: "labrc2".into(),
+            level: " ".into(),
+            ..Default::default()
+        };
+        assert_eq!(player_line("online", &rc), "[online] 5 labrc2 (RC)");
+        assert_eq!(player_line("update", &rc), "[update] 5 labrc2 (RC)");
     }
 
     #[test]

@@ -7,8 +7,12 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 
 ## Small follow-ups to stage 1
 
-- [ ] `login`: print `[update]` rather than `[online]` when `ADDPLAYER` comes for
-      an id already listed (the fork resends it when props change).
+- [x] `login`: print `[update]` rather than `[online]` when `ADDPLAYER` comes for
+      an id already listed (the fork resends it when props change). The stored
+      entry is replaced; after `DELPLAYER` the next one is `[online]` again.
+      Evidence: fake gserver in `tests/fake_servers.rs`. No real client. The
+      fork was not re-run (lab pack not available). The resend was seen on
+      2026-10-31 (`docs/lab/2026-10-31-stage1.md`).
 - [ ] Read `PLO_OTHERPLPROPS` (8) for RCs if the fork sends it on nickname or
       level changes (**check**), and update `PlayerList`.
 - [ ] `--nick` default: real RCs always send a nickname; decide whether to send
