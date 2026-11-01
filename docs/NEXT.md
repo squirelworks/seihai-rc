@@ -72,10 +72,21 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       after the password until a loopback capture shows one. Evidence:
       fake NPC-server in `tests/nc_login.rs`. No real client was checked;
       the GServer-v2 lab pack was not available.
-- [ ] Discovery. On the game-server RC link, id 94 (`PLI_NPCSERVERQUERY`)
-      then id 79 (`PLO_NPCSERVERADDR`), and only then the NC socket.
-- [ ] NPC, class and weapon list / get / set / delete. Payloads the note
-      still marks as needing a lab check stay unparsed until then.
+- [x] Discovery. On the game-server RC link, id 94 (`PLI_NPCSERVERQUERY`:
+      GSHORT player id, then the text `location`) for each nickname that
+      contains `(Server)`, then id 79 (`PLO_NPCSERVERADDR`: GSHORT player id,
+      then the rest of the line). The NPC-Control socket is opened only after
+      exactly one line parses as an address. The separator (comma or spaces)
+      still needs a lab check; both shapes are accepted and any other shape,
+      including a colon, does not open the socket.
+      `seihai-rc nc discover --server 127.0.0.1:14802`. Evidence: fake
+      gserver in `tests/nc_commands.rs`. No real client. The fork was not run.
+- [x] NPC, class and weapon list / get / set / delete. Payloads the note
+      still marks as needing a lab check stay unparsed: class delete (119 out,
+      188 in) is not sent and not read as a name; a script that contains a
+      line break is not sent; a weapon script whose GSHORT length does not
+      fit the message is not parsed. See `docs/PROTOCOL.md`. Evidence:
+      `tests/nc_commands.rs`. No real client. The fork was not run.
 
 ## Window
 

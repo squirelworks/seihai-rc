@@ -73,13 +73,14 @@ then id 2 status (`\r` = new line), id 3 site URL, id 5 upgrade URL. Names carry
 a type tag (`P `, `H `, `3 `, `U `; none for classic). A refused login gets id 4
 with the reason and the link closes.
 
-## NPC Control (stage 5, login only)
+## NPC Control
 
-A second socket, not the RC game-server link. Layouts follow the behaviour
+A second socket from the RC game-server link. Layouts follow the behaviour
 in Graal_analysis `protocol/npc-control.md` (link only; that note is not
-copied here). `seihai-rc nc login` speaks this. Finding the address from the
-game server (ids 94 and 79) and the NPC / class / weapon commands are not
-in this slice.
+copied here). Fields that note still leaves for a lab check are not given
+a byte layout below, and this client does not invent one.
+
+### Login
 
 | | |
 |---|---|
@@ -92,13 +93,70 @@ Nothing is sent after the password. A loopback capture of a real NPC-server
 may still show an extra byte; until that run, this client does not add one.
 
 The staff client treats the socket as connected once the login frame is
-written. This client does the same when the link stays open. Id 16
+written. `nc login` does the same when the link stays open. Id 16
 (`DISCMESSAGE`, text) during that wait is a refusal and the command fails.
-Later id 16 lines are printed as `[disconnected]`. Every other id is printed
-as `[nc] id N (L bytes)` and is not parsed yet. Large raw uploads (id 50
+Later id 16 lines are printed as `[disconnected]`. An id this client does not
+parse is printed as `[nc] id N (L bytes)`. Large raw uploads (id 50
 out, id 100 in) are not handled on the NPC-Control socket. The file link
 below uses those two ids on the RC socket, because a file may contain line
 feeds and an ordinary message may not.
+
+### Finding the NPC-server
+
+On the game-server RC link, after the player list is in:
+
+1. A player whose nickname contains `(Server)` is an NPC-server player.
+2. This client sends id 94 (`PLI_NPCSERVERQUERY`): GSHORT player id, then the text `location`.
+3. Id 79 (`PLO_NPCSERVERADDR`) is a GSHORT player id, then the rest of the line as text.
+
+The notes call that text an address. Whether the host and port are separated
+by a comma or by spaces still needs a lab check. This client accepts either
+`host,port` or `host port` (spaces may sit around the comma) and no other
+shape. A colon is not a separator. Text that matches neither shape is printed
+unchanged, and the NPC-Control socket is not opened.
+
+`seihai-rc nc discover --server 127.0.0.1:14802` logs into the game server,
+sends id 94, and prints each id 79. It does not open the NPC-Control socket.
+The other `nc` commands take `--discover 127.0.0.1:14802` when the address
+should be found first: the socket is opened only after exactly one id 79
+line parsed as an address. `--server` on those commands is the NPC-server
+itself. Give one of the two, not both.
+
+### NPC, class and weapon commands
+
+GINT3 is three GCHARs, high 7 bits first. A GSTRING is a GCHAR length and
+then the bytes. A line feed ends a message, so a script that contains one
+is not sent. The raw-data path for a large set (ids 109, 113 and 117) still
+needs a lab check.
+
+There is no NPC-list or class-list request in the notes. After login this
+client waits `--settle` ms and reads what arrived.
+
+| Action | Client to server | Server to client |
+|---|---|---|
+| NPC list | (none) | 158 `NC_NPCADD`: GINT3 id, then any subset of GCHAR 50 + GSTRING name, GCHAR 51 + GSTRING type, GCHAR 52 + GSTRING level, in any order. 159 `NC_NPCDELETE`: GINT3 id, and only when those three bytes are the whole payload |
+| NPC get | 103 `NC_NPCGET`: GINT3 id | 157 `NC_NPCATTRIBUTES`: the rest of the line. The notes show 157 as the attribute text; that it is the reply to 103 still needs a lab check. If 157 does not arrive the command fails and names what did |
+| NPC script | 106 `NC_NPCSCRIPTGET`: GINT3 id | 160 `NC_NPCSCRIPT`: GINT3 id, then the script |
+| NPC set | 109 `NC_NPCSCRIPTSET`: GINT3 id, then the script | no reply id is named. The command finishes when the link stays up |
+| NPC delete | 104 `NC_NPCDELETE`: GINT3 id | waits for 159 for that id |
+| Class list | (none) | 163 `NC_CLASSADD`: the rest of the line is one class name |
+| Class get | 112 `NC_CLASSEDIT`: the class name as the rest of the line | 162 `NC_CLASSGET`: GSTRING name, then the script |
+| Class set | 113 `NC_CLASSADD`: GSTRING name, then the script | no reply id is named |
+| Class delete | 119 is not sent | 188 is not parsed |
+| Weapon list | 115 `NC_WEAPONLISTGET`: no payload | 167: repeated GSTRING names |
+| Weapon get | 116 `NC_WEAPONGET`: the weapon name as the rest of the line | 33: GSTRING name, GSTRING image, GSHORT length, then that many script bytes |
+| Weapon set | 117: GSTRING name, GSTRING image, then the script | no reply id is named |
+| Weapon delete | 118: the weapon name as the rest of the line | no reply id is named |
+
+Still needs a lab check, and so is not turned into fields:
+
+- Id 158 with a property other than 50, 51 or 52. The whole payload stays raw. Whether a missing property clears a value already stored also still needs a lab check; this client leaves the stored value.
+- Id 159 with bytes after the GINT3.
+- Id 188, and client id 119. The notes still disagree on a bare class name versus a length-prefixed string. `nc class delete` prints that and sends nothing.
+- Ids 112, 116 and 118. The notes write `str` where a length byte was seen, and they do not write it for these three, so this client sends the name as the rest of the line. A lab check should confirm there is no length byte.
+- Id 33 when the GSHORT length runs past the message. A GINT3 length for a large script still needs a lab check and is not tried. A script byte that is a line feed still needs a lab check: the frame reader stops at a line feed.
+- Each id 167 replaces the stored weapon list. Whether a second one is a full list or an addition still needs a lab check. The notes describe the packet as the list, so this client treats each one as the whole list.
+- Attribute text, class names and scripts are the rest of the one message that carried them. A line feed inside that text still needs a lab check.
 
 ## File link (list, get, put)
 

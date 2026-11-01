@@ -28,12 +28,17 @@ use std::time::{Duration, Instant};
 use seihai_core::protocol::{read_gshort, Message};
 
 use crate::link::{Codec, Link};
-use crate::wire::{gchar, latin1_bytes, message, push_gstring, read_gstring, text};
+use crate::wire::{gchar, latin1_bytes, message, push_gshort, push_gstring, read_gstring, text};
 
 /// Client to server: player props (the RC sends its nickname this way).
 pub const PLI_PLAYERPROPS: u8 = 2;
 /// Client to server: a line in the RC chat.
 pub const PLI_RC_CHAT: u8 = 79;
+/// Client to server: ask where an NPC-server player is listening.
+pub const PLI_NPCSERVERQUERY: u8 = 94;
+
+/// The text id 94 sends after the player id.
+pub const NPCSERVER_QUERY_TEXT: &str = "location";
 
 /// Server to client ids an RC handles.
 pub const PLO_DISCMESSAGE: u8 = 16;
@@ -43,6 +48,8 @@ pub const PLO_PRIVATEMESSAGE: u8 = 37;
 pub const PLO_ADDPLAYER: u8 = 55;
 pub const PLO_DELPLAYER: u8 = 56;
 pub const PLO_RC_CHAT: u8 = 74;
+/// Server to client: the NPC-server address for one player.
+pub const PLO_NPCSERVERADDR: u8 = 79;
 
 /// Player prop ids carried in `ADDPLAYER`.
 pub const PROP_NICKNAME: u8 = 0;
@@ -130,6 +137,94 @@ pub fn rc_chat_message(line: &str) -> Vec<u8> {
     message(PLI_RC_CHAT, &latin1_bytes(line))
 }
 
+/// True when the staff client treats this nickname as an NPC-server player.
+pub fn is_npc_server_player(nickname: &str) -> bool {
+    nickname.contains("(Server)")
+}
+
+/// Id 94: GSHORT player id, then the text `location`.
+pub fn npc_server_query(player_id: u16) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + NPCSERVER_QUERY_TEXT.len());
+    push_gshort(&mut payload, player_id);
+    payload.extend_from_slice(NPCSERVER_QUERY_TEXT.as_bytes());
+    message(PLI_NPCSERVERQUERY, &payload)
+}
+
+/// Host and port read from an id 79 line.
+///
+/// The notes still need a lab check to choose between `host,port` and
+/// `host port`. [`parse_npc_endpoint`] accepts those two and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpcEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+impl NpcEndpoint {
+    /// `host:port` for a TCP connect. The colon is not a wire separator.
+    pub fn socket_addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Id 79: GSHORT player id, then the address text unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpcServerAddr {
+    pub player_id: u16,
+    pub raw: String,
+    pub endpoint: Option<NpcEndpoint>,
+}
+
+/// One id 79 reply, with the nickname we had stored for that player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpcServerFound {
+    pub player_id: u16,
+    pub nickname: String,
+    pub addr: NpcServerAddr,
+}
+
+/// Read an id 79 payload. The bytes after the id stay in [`NpcServerAddr::raw`].
+pub fn parse_npc_server_addr(payload: &[u8]) -> Option<NpcServerAddr> {
+    let player_id = read_gshort(payload)?;
+    let raw = text(&payload[2..]);
+    let endpoint = parse_npc_endpoint(&raw);
+    Some(NpcServerAddr {
+        player_id,
+        raw,
+        endpoint,
+    })
+}
+
+/// Accept `host,port` or `host port`. Spaces around a comma are ignored.
+/// A colon, a missing port, or a third word does not match.
+pub fn parse_npc_endpoint(raw: &str) -> Option<NpcEndpoint> {
+    let raw = raw.trim();
+    let (host, port) = if let Some((host, port)) = raw.split_once(',') {
+        let host = host.trim();
+        let port = port.trim();
+        if port.contains(',') || port.contains(char::is_whitespace) {
+            return None;
+        }
+        (host, port)
+    } else {
+        let mut parts = raw.split_whitespace();
+        let host = parts.next()?;
+        let port = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        (host, port)
+    };
+    if host.is_empty() || host.contains(':') || host.contains(',') {
+        return None;
+    }
+    let port = port.parse::<u16>().ok()?;
+    Some(NpcEndpoint {
+        host: host.to_string(),
+        port,
+    })
+}
+
 /// One player or RC in the server's list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlayerEntry {
@@ -168,6 +263,8 @@ pub enum Event {
     UpdatePlayer(PlayerEntry),
     /// A player or RC left.
     DelPlayer(u16),
+    /// Id 79: where an NPC-server player is listening.
+    NpcServerAddr(NpcServerAddr),
     /// Anything else (id, payload).
     Other(u8, Vec<u8>),
 }
@@ -190,6 +287,10 @@ pub fn parse_event(m: &Message) -> Event {
         },
         PLO_DELPLAYER => match read_gshort(p) {
             Some(id) => Event::DelPlayer(id),
+            None => Event::Other(m.id, p.clone()),
+        },
+        PLO_NPCSERVERADDR => match parse_npc_server_addr(p) {
+            Some(addr) => Event::NpcServerAddr(addr),
             None => Event::Other(m.id, p.clone()),
         },
         id => Event::Other(id, p.clone()),
@@ -390,6 +491,37 @@ impl Session {
         self.link.send(&[rc_chat_message(line)])
     }
 
+    /// Send messages that are already encoded (no line feed inside them).
+    pub fn send_messages(&mut self, msgs: &[Vec<u8>]) -> io::Result<()> {
+        self.link.send(msgs)
+    }
+
+    /// Query every player whose nickname contains `(Server)`, then collect
+    /// id 79 replies already in hand and any that arrive before `deadline`.
+    pub fn query_npc_servers(
+        &mut self,
+        quiet: Duration,
+        deadline: Instant,
+    ) -> io::Result<Vec<NpcServerFound>> {
+        let burst = self.settle(quiet, deadline)?;
+        let mut found = found_in(&self.players, &burst);
+        let targets: Vec<u16> = self
+            .players
+            .players
+            .values()
+            .filter(|entry| is_npc_server_player(&entry.nickname))
+            .map(|entry| entry.id)
+            .collect();
+        if targets.is_empty() || Instant::now() >= deadline {
+            return Ok(found);
+        }
+        let msgs: Vec<Vec<u8>> = targets.into_iter().map(npc_server_query).collect();
+        self.send_messages(&msgs)?;
+        let more = self.settle(quiet, deadline)?;
+        found.extend(found_in(&self.players, &more));
+        Ok(found)
+    }
+
     /// True once the server has closed the link.
     pub fn is_closed(&self) -> bool {
         self.link.is_closed()
@@ -399,6 +531,40 @@ impl Session {
     pub fn close(self) {
         self.link.shutdown();
     }
+}
+
+fn found_in(players: &PlayerList, events: &[Event]) -> Vec<NpcServerFound> {
+    events
+        .iter()
+        .filter_map(|event| {
+            let Event::NpcServerAddr(addr) = event else {
+                return None;
+            };
+            let nickname = players
+                .players
+                .get(&addr.player_id)
+                .map(|entry| entry.nickname.clone())
+                .unwrap_or_default();
+            Some(NpcServerFound {
+                player_id: addr.player_id,
+                nickname,
+                addr: addr.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Log in to the game server and run [`Session::query_npc_servers`].
+pub fn discover_npc_servers(
+    addr: &str,
+    params: &LoginParams,
+    timeout: Duration,
+    quiet: Duration,
+) -> Result<Vec<NpcServerFound>, LoginError> {
+    let mut session = Session::login(addr, params, timeout)?;
+    let found = session.query_npc_servers(quiet, Instant::now() + timeout)?;
+    session.close();
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -525,5 +691,37 @@ mod tests {
         let mut p = vec![0x20 + 1, 0x20 + 2]; // (1 << 7) | 2 = 130
         push_gstring(&mut p, b"a");
         assert_eq!(parse_addplayer(&p).unwrap().id, 130);
+    }
+
+    #[test]
+    fn npc_server_query_is_the_player_id_and_location() {
+        let msg = npc_server_query(4);
+        assert_eq!(msg[0], gchar(PLI_NPCSERVERQUERY));
+        assert_eq!(seihai_core::protocol::read_gshort(&msg[1..]).unwrap(), 4);
+        assert_eq!(&msg[3..], b"location");
+        assert!(!is_npc_server_player("Alice"));
+        assert!(is_npc_server_player("Lab NPC (Server)"));
+    }
+
+    #[test]
+    fn npc_server_address_accepts_comma_or_space_only() {
+        let comma = parse_npc_endpoint("127.0.0.1,14804").unwrap();
+        assert_eq!(comma.socket_addr(), "127.0.0.1:14804");
+        let spaced = parse_npc_endpoint("  127.0.0.1 14804 ").unwrap();
+        assert_eq!(spaced, comma);
+        let padded = parse_npc_endpoint("127.0.0.1, 14804").unwrap();
+        assert_eq!(padded, comma);
+        assert!(parse_npc_endpoint("127.0.0.1:14804").is_none());
+        assert!(parse_npc_endpoint("127.0.0.1,14804,1").is_none());
+        assert!(parse_npc_endpoint("127.0.0.1 14804 extra").is_none());
+        assert!(parse_npc_endpoint("127.0.0.1").is_none());
+
+        let mut payload = Vec::new();
+        crate::wire::push_gshort(&mut payload, 4);
+        payload.extend_from_slice(b"127.0.0.1,14804");
+        let addr = parse_npc_server_addr(&payload).unwrap();
+        assert_eq!(addr.player_id, 4);
+        assert_eq!(addr.raw, "127.0.0.1,14804");
+        assert_eq!(addr.endpoint.unwrap().port, 14804);
     }
 }

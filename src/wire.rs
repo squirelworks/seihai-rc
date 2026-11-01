@@ -9,6 +9,19 @@ pub fn gchar(n: u8) -> u8 {
     n.wrapping_add(0x20)
 }
 
+/// Append a GSHORT: two GCHARs, high 7 bits first.
+pub fn push_gshort(out: &mut Vec<u8>, n: u16) {
+    out.push(gchar(((n >> 7) & 0x7F) as u8));
+    out.push(gchar((n & 0x7F) as u8));
+}
+
+/// Append a GINT3: three GCHARs, high 7 bits first. Twenty-one bits.
+pub fn push_gint3(out: &mut Vec<u8>, n: u32) {
+    out.push(gchar(((n >> 14) & 0x7F) as u8));
+    out.push(gchar(((n >> 7) & 0x7F) as u8));
+    out.push(gchar((n & 0x7F) as u8));
+}
+
 /// Append a GSTRING: GCHAR length, then the bytes. Text longer than 223
 /// bytes is cut, as a GCHAR cannot say more.
 pub fn push_gstring(out: &mut Vec<u8>, s: &[u8]) {
@@ -64,5 +77,16 @@ mod tests {
         assert_eq!(latin1_bytes("é"), vec![0xE9]);
         assert_eq!(text(&[0xE9]), "é");
         assert_eq!(latin1_bytes("✓"), b"?");
+    }
+
+    #[test]
+    fn gshort_and_gint3_round_trip() {
+        use seihai_core::protocol::{read_gint3, read_gshort};
+
+        let mut v = Vec::new();
+        push_gshort(&mut v, 130);
+        push_gint3(&mut v, 0x1F_FFFF);
+        assert_eq!(read_gshort(&v).unwrap(), 130);
+        assert_eq!(read_gint3(&v[2..]).unwrap(), 0x1F_FFFF);
     }
 }

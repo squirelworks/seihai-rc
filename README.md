@@ -10,10 +10,11 @@ Part of the Seihai server stack:
 [seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) (GPL fork of GServer-v2, ships first) ·
 client: [seihai](https://github.com/squirelworks/seihai).
 
-**Status: stage 1, command line only, plus an NPC-Control login and the file
-link.** Log in directly or through the listserver's RC list, watch the RC
-chat, list the players online. `nc login` opens the separate NPC-server
-socket (type 3, plain zlib) when you already know its address. A live level
+**Status: command line.** Log in directly or through the listserver's RC
+list, watch the RC chat, and list the players online. `nc login` opens the
+separate NPC-server socket (type 3, plain zlib) when you already know its
+address. NPC Control can also find the NPC-server from the game server and
+then list, get, set and delete NPCs, classes and weapons. A live level
 editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
 session; there is no file window in this slice. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
@@ -41,6 +42,12 @@ seihai-rc login --server 127.0.0.1:14802 --account myrc --nick "My RC" --for 30
 
 # NPC-Control socket, when its address is already known (lab port 14804)
 seihai-rc nc login --server 127.0.0.1:14804 --account myrc --for 30
+
+# NPC-server address from the game server, then the lists on that socket
+seihai-rc nc discover --server 127.0.0.1:14802 --account myrc
+seihai-rc nc npcs --discover 127.0.0.1:14802 --account myrc --tsv
+seihai-rc nc npc get 12 --server 127.0.0.1:14804 --account myrc
+seihai-rc nc weapons --server 127.0.0.1:14804 --account myrc
 ```
 
 `--rc classic` logs in as the 2000 to 2002 RCs did (type 1, plain zlib);
