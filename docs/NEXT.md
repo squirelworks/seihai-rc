@@ -53,8 +53,17 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
 
 ## Stage 5: NPC Control
 
-A second login as type 3 (NC) to the NPC-server or the fork's built-in one.
-Needs its own protocol notes first (`npc-control.md` in the project files).
+Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
+
+- [x] Login and framing. Type 3, token `NCL11012`, plain zlib both ways,
+      no key byte (`seihai-rc nc login --server 127.0.0.1:14804`). No bytes
+      after the password until a loopback capture shows one. Evidence:
+      fake NPC-server in `tests/nc_login.rs`. No real client was checked;
+      the GServer-v2 lab pack was not available.
+- [ ] Discovery. On the game-server RC link, id 94 (`PLI_NPCSERVERQUERY`)
+      then id 79 (`PLO_NPCSERVERADDR`), and only then the NC socket.
+- [ ] NPC, class and weapon list / get / set / delete. Payloads the note
+      still marks as needing a lab check stay unparsed until then.
 
 ## Window
 

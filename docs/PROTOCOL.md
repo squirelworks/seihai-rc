@@ -66,3 +66,28 @@ type tag + name, language, description, URL, version, players, host, port),
 then id 2 status (`\r` = new line), id 3 site URL, id 5 upgrade URL. Names carry
 a type tag (`P `, `H `, `3 `, `U `; none for classic). A refused login gets id 4
 with the reason and the link closes.
+
+## NPC Control (stage 5, login only)
+
+A second socket, not the RC game-server link. Layouts follow the behaviour
+in Graal_analysis `protocol/npc-control.md` (link only; that note is not
+copied here). `seihai-rc nc login` speaks this. Finding the address from the
+game server (ids 94 and 79) and the NPC / class / weapon commands are not
+in this slice.
+
+| | |
+|---|---|
+| Login type | 3 |
+| Token | `NCL11012` (eight bytes, no key byte) |
+| Body | `GCHAR 3` + token + `GSTRING` account + `GSTRING` password + `\n` |
+| Frames | `u16be` length + zlib body, both ways, including the login and every frame after it. No compression-type byte and no cipher. |
+
+Nothing is sent after the password. A loopback capture of a real NPC-server
+may still show an extra byte; until that run, this client does not add one.
+
+The staff client treats the socket as connected once the login frame is
+written. This client does the same when the link stays open. Id 16
+(`DISCMESSAGE`, text) during that wait is a refusal and the command fails.
+Later id 16 lines are printed as `[disconnected]`. Every other id is printed
+as `[nc] id N (L bytes)` and is not parsed yet. Large raw uploads (id 50
+out, id 100 in) are not handled.

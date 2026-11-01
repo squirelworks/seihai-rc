@@ -4,10 +4,11 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use seihai_rc::listserver::{fetch_rc_list, pick};
+use seihai_rc::nc::{NcEvent, NcSession};
 use seihai_rc::rc::{Event, LoginParams, PlayerEntry, RcKind, Session};
 
 const USAGE: &str = "\
-seihai-rc: Graal Remote Control client (stage 1)
+seihai-rc: Graal Remote Control client (stage 1, plus NPC-Control login)
 
 USAGE:
   seihai-rc servers --listserver HOST:PORT --account NAME [options]
@@ -15,12 +16,16 @@ USAGE:
                     --account NAME [--for SECS] [--say TEXT] [options]
   seihai-rc players list (--server ... | --listserver ... --pick ...)
                     --account NAME [--tsv] [--settle MS] [options]
+  seihai-rc nc login --server HOST:PORT --account NAME [--for SECS] [options]
 
   servers       Log in to the listserver's RC list and print every server.
   login         Log in to a gserver and print server messages and the RC
                 chat for --for seconds (default 5; 0 = until the server
                 closes the link). --say sends one RC chat line first.
   players list  Log in and print the players and RCs online.
+  nc login      Log in to an NPC-server (type 3, plain zlib) and print
+                message ids for --for seconds. The address is the one you
+                pass; finding it from the game server is a later step.
 
 OPTIONS:
   --password-env VAR   Read the password from this environment variable
@@ -250,6 +255,49 @@ fn row(e: &PlayerEntry, tsv: bool) -> String {
     }
 }
 
+fn cmd_nc_login(o: &Opts) -> Result<(), String> {
+    let c = common(o)?;
+    if o.listserver.is_some() || o.pick.is_some() {
+        return Err(
+            "nc login takes --server HOST:PORT; the RC list does not carry the NPC-server address"
+                .into(),
+        );
+    }
+    let addr = o
+        .server
+        .clone()
+        .ok_or("nc login needs --server HOST:PORT")?;
+    let mut s = NcSession::login(&addr, &c.account, &c.password, c.timeout)
+        .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
+    eprintln!("connected to {addr} as {} (NPC Control)", c.account);
+    let secs = o.for_secs.unwrap_or(5);
+    let deadline = if secs == 0 {
+        Instant::now() + Duration::from_secs(u64::from(u32::MAX))
+    } else {
+        Instant::now() + Duration::from_secs(secs)
+    };
+    loop {
+        match s.next_event(deadline).map_err(|e| e.to_string())? {
+            Some(NcEvent::Disconnect(why)) => {
+                println!("[disconnected] {why}");
+                s.close();
+                return Err(format!("NPC-server disconnected: {why}"));
+            }
+            Some(NcEvent::Message { id, payload }) => {
+                println!("[nc] id {id} ({} bytes)", payload.len());
+            }
+            None => {
+                if s.is_closed() {
+                    println!("[closed] the server closed the link");
+                }
+                break;
+            }
+        }
+    }
+    s.close();
+    Ok(())
+}
+
 fn cmd_players_list(o: &Opts) -> Result<(), String> {
     let c = common(o)?;
     let (mut s, _) = login(o, &c)?;
@@ -302,6 +350,7 @@ fn main() -> ExitCode {
         ["servers"] => cmd_servers(&o),
         ["login"] => cmd_login(&o),
         ["players", "list"] | ["players"] => cmd_players_list(&o),
+        ["nc", "login"] => cmd_nc_login(&o),
         _ => {
             eprintln!(
                 "seihai-rc: unknown command {:?}\n\n{USAGE}",
@@ -342,5 +391,17 @@ mod tests {
     #[test]
     fn rejects_unknown_option() {
         assert!(parse_args(args("login --password secret")).is_err());
+    }
+
+    #[test]
+    fn parses_nc_login() {
+        let o = parse_args(args(
+            "nc login --server 127.0.0.1:14804 --account staff --for 0",
+        ))
+        .unwrap();
+        assert_eq!(o.cmd, ["nc", "login"]);
+        assert_eq!(o.server.as_deref(), Some("127.0.0.1:14804"));
+        assert_eq!(o.account.as_deref(), Some("staff"));
+        assert_eq!(o.for_secs, Some(0));
     }
 }
