@@ -34,5 +34,12 @@ Each feature: a command-line form first (`seihai-rc players list --server ...`),
 tested in CI against `seihai-gserver` and in the lab against the fork, then the
 window.
 
+## Out of scope: Graal3D (February 2000)
+
+No work. That side project has its own admin packets on `GR3DV002`, not the
+RC/NC path. Seihai covers its client admin as **G3D-5** and its host as
+**G3D-9** in `documentation/plannedmilestones.md`. Do not add RC features
+for it here.
+
 Status and the next steps in order: [NEXT.md](NEXT.md). Code layout:
 [ARCHITECTURE.md](ARCHITECTURE.md).
