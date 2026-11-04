@@ -504,6 +504,7 @@ fn servers_command_uses_the_secure_handshake() {
             "5",
         ])
         .env("SEIHAI_RC_PASSWORD", "labpw")
+        .env("SEIHAI_RC_TEST_NEW_PW", "labpw2")
         .output()
         .unwrap();
     assert!(
@@ -587,6 +588,38 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
             message(id, &p)
         };
         let mut props = CAPTURED_72_AFTER_ACCOUNT.to_vec();
+        // Accounts by name, each as the 73 that answers a get (capture 3).
+        let mut accounts: Vec<(Vec<u8>, Vec<u8>)> = vec![(
+            b"test1".to_vec(),
+            b"%test1 3lab@example.invalid   $main  ".to_vec(),
+        )];
+        // A 78 or 70 payload as the 73 the server would send: no password,
+        // and one 0x20 before the reason.
+        let as_73 = |p: &[u8]| -> (Vec<u8>, Vec<u8>) {
+            let mut i = 0;
+            let gs = |i: &mut usize| {
+                let n = usize::from(p[*i] - 0x20);
+                let v = p[*i + 1..*i + 1 + n].to_vec();
+                *i += 1 + n;
+                v
+            };
+            let account = gs(&mut i);
+            gs(&mut i);
+            let email = gs(&mut i);
+            let flags = p[i..i + 3].to_vec();
+            i += 3;
+            let worlds = gs(&mut i);
+            let reason = gs(&mut i);
+            let mut r = Vec::new();
+            push_gstring(&mut r, &account);
+            push_gstring(&mut r, b"");
+            push_gstring(&mut r, &email);
+            r.extend_from_slice(&flags);
+            push_gstring(&mut r, &worlds);
+            r.push(0x20);
+            push_gstring(&mut r, &reason);
+            (account, r)
+        };
         let after_account = |p: &[u8]| -> (Vec<u8>, Vec<u8>) {
             let n = usize::from(p[0] - 0x20);
             (p[1..1 + n].to_vec(), p[1 + n..].to_vec())
@@ -628,6 +661,32 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
                         r.extend_from_slice(&props);
                         send_msgs(&mut s, &mut codec, &[message(72, &r)]);
                     }
+                    77 => {
+                        if let Some((_, r)) = accounts.iter().find(|(n, _)| *n == m.payload) {
+                            send_msgs(&mut s, &mut codec, &[message(73, r)]);
+                        }
+                    }
+                    70 | 78 => {
+                        let (name, r) = as_73(&m.payload);
+                        accounts.retain(|(n, _)| *n != name);
+                        accounts.push((name, r));
+                    }
+                    71 => accounts.retain(|(n, _)| *n != m.payload),
+                    72 => {
+                        // The pattern: `%` alone, a prefix then `%`, or a name.
+                        let (pattern, _) = after_account(&m.payload);
+                        let mut r = Vec::new();
+                        for (n, _) in &accounts {
+                            let hit = match pattern.strip_suffix(b"%") {
+                                Some(prefix) => n.starts_with(prefix),
+                                None => *n == pattern,
+                            };
+                            if hit {
+                                push_gstring(&mut r, n);
+                            }
+                        }
+                        send_msgs(&mut s, &mut codec, &[message(70, &r)]);
+                    }
                     76 => {
                         // Everything after the account is the 72 tail, then
                         // one GCHAR 0.
@@ -646,8 +705,12 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
 }
 
 fn run_players(addr: &str, extra: &[&str]) -> (bool, String, String) {
+    run_group("players", addr, extra)
+}
+
+fn run_group(group: &str, addr: &str, extra: &[&str]) -> (bool, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_seihai-rc"))
-        .arg("players")
+        .arg(group)
         .args(extra)
         .args([
             "--server",
@@ -660,6 +723,7 @@ fn run_players(addr: &str, extra: &[&str]) -> (bool, String, String) {
             "5",
         ])
         .env("SEIHAI_RC_PASSWORD", "labpw")
+        .env("SEIHAI_RC_TEST_NEW_PW", "labpw2")
         .output()
         .unwrap();
     (
@@ -840,6 +904,7 @@ fn players_ban_without_a_reply_fails() {
             "1",
         ])
         .env("SEIHAI_RC_PASSWORD", "labpw")
+        .env("SEIHAI_RC_TEST_NEW_PW", "labpw2")
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -934,4 +999,96 @@ fn players_props_set_refuses_an_unknown_name_before_logging_in() {
     let (ok, _, err) = run_players("127.0.0.1:1", &["props", "bob", "--set", "nick=x"]);
     assert!(!ok);
     assert!(err.contains("not a prop this client sets"), "{err}");
+}
+
+#[test]
+fn accounts_list_get_and_set_follow_capture_3() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_group(
+        "accounts",
+        &addr,
+        &[
+            "set",
+            "test1",
+            "--admin-level",
+            "2",
+            "--reason",
+            "lab reason",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("admin level: 2\n"), "{out}");
+    assert!(out.contains("ban reason: lab reason\n"), "{out}");
+    assert!(out.contains("e-mail: lab@example.invalid\n"), "{out}");
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [77, 78, 77]);
+    assert_eq!(seen[0].payload, b"test1");
+    // The rest goes back as read; no ban time, the password left empty.
+    assert_eq!(
+        seen[1].payload,
+        b"%test1 3lab@example.invalid  \"$main,\"lab reason\""
+    );
+
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_group("accounts", &addr, &["list"]);
+    assert!(ok, "{err}");
+    assert!(out.ends_with("test1\n"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen[0].id, 72);
+    assert_eq!(seen[0].payload, b"!% ");
+}
+
+#[test]
+fn accounts_add_then_delete() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_group(
+        "accounts",
+        &addr,
+        &[
+            "add",
+            "labadd",
+            "--new-password-env",
+            "SEIHAI_RC_TEST_NEW_PW",
+            "--email",
+            "add@example.invalid",
+            "--admin-level",
+            "1",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("admin worlds: all\n"), "{out}");
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [70, 77]);
+    // The bytes the real RC sent for its add (capture 3), with this
+    // test's placeholder password.
+    assert_eq!(
+        seen[0].payload,
+        b"&labadd&labpw23add@example.invalid  !#all "
+    );
+
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_group("accounts", &addr, &["delete", "test1", "--yes"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().last(), Some("deleted test1"));
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [71, 72]);
+    assert_eq!(seen[0].payload, b"test1");
+}
+
+#[test]
+fn accounts_refuse_before_logging_in() {
+    for args in [
+        &["delete", "test1"][..],
+        &["add", "labadd"][..],
+        &["set", "test1"][..],
+        &["set", "test1", "--banned", "maybe"][..],
+        &["set", "test1", "--admin-level", "300"][..],
+    ] {
+        let (ok, _, err) = run_group("accounts", "127.0.0.1:1", args);
+        assert!(!ok, "{args:?}");
+        assert!(!err.contains("127.0.0.1:1"), "{args:?}: {err}");
+    }
 }

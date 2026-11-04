@@ -86,12 +86,14 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 
 ## Stage 3: accounts
 
-`PLI_RC_ACCOUNTLISTGET` (72, with a filter) → `PLO_RC_ACCOUNTLISTGET` (70);
-`PLI_RC_ACCOUNTADD` (70), `ACCOUNTDEL` (71), `ACCOUNTGET` (77) →
-`PLO_RC_ACCOUNTGET` (73), `ACCOUNTSET` (78). The account list (72 → 70)
-and account get and set (77/78 → 73) were seen from the real RC on
-2026-11-04 (`docs/lab/2026-11-04-rc-props-set.md`); the field order after
-the e-mail still needs one run per field. Add and delete are **check**.
+- [x] List (72 → 70), get (77 → 73), set (78), add (70) and delete (71):
+      `seihai-rc accounts list/get/set/add/delete`. Evidence: a real RC
+      against the fork, one field per apply, and `seihai-rc` live against
+      the fork (`docs/lab/2026-11-04-rc-accounts.md`); each builder has a
+      byte test from the capture and a case in `tests/fake_servers.rs`.
+- [ ] The byte before the ban reason in 73 (most likely the ban time).
+      Only 0x20 has been seen; a 73 with another value is not read.
+- [ ] Fork: keep load only, admin level and admin worlds from 78 and 70.
 
 ## Stage 4: server
 

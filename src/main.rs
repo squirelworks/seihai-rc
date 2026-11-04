@@ -3,6 +3,10 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use seihai_rc::accounts::{
+    account_add, account_delete, account_get, account_list, account_set, parse_account,
+    parse_account_list, plo as accounts_plo, Account,
+};
 use seihai_rc::listserver::{decode_server_key, fetch_rc_list, fetch_rc_list_secure, pick};
 use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_delete_message,
@@ -37,6 +41,11 @@ USAGE:
   seihai-rc players props WHO [--set NAME=VALUE,...] (--server ... | --listserver ... --pick ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
+  seihai-rc accounts list [PATTERN] [--where COND] (--server ... | --listserver ... --pick ...)
+  seihai-rc accounts get ACCOUNT (--server ... | --listserver ... --pick ...)
+  seihai-rc accounts set ACCOUNT [FIELDS] (--server ... | --listserver ... --pick ...)
+  seihai-rc accounts add ACCOUNT --new-password-env VAR [FIELDS] (--server ...)
+  seihai-rc accounts delete ACCOUNT --yes (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
   seihai-rc nc login --server HOST:PORT --account NAME [--for SECS] [options]
   seihai-rc nc npcs (--server HOST:PORT | --discover HOST:PORT) --account NAME
@@ -84,6 +93,24 @@ USAGE:
                 such as 30.5 are allowed.
                 WHO is a player id or an account name; the client reads the
                 player list first (--settle) and refuses a WHO not in it.
+  accounts list Print the accounts whose name matches PATTERN (default
+                %, which matches any) and the server-side --where
+                condition, such as \"adminlevel>0\" (id 72, reply 70).
+  accounts get  Print an account's e-mail, banned, load only, admin level,
+                admin worlds and ban reason (id 77, reply 73).
+  accounts set  Change the fields given and send the rest back as read
+                (id 78), then read the account back and name any field
+                the server did not keep. FIELDS: --email E, --banned on|off,
+                --load-only on|off, --admin-level N, --admin-worlds W,
+                --reason TEXT (ban reason, one item per line), and
+                --new-password-env VAR (the new password; without it the
+                password is left as it is). The ban time is not sent; the
+                real RC sends none.
+  accounts add  Make an account (id 70, the same fields), then read it
+                back. --new-password-env is required.
+  accounts delete
+                Delete an account (id 71), then list it to check it is
+                gone. Needs --yes, as it cannot be undone.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -165,6 +192,14 @@ struct Opts {
     set_file: Option<String>,
     reason: Option<String>,
     ip_range: Option<String>,
+    email: Option<String>,
+    banned: Option<String>,
+    load_only: Option<String>,
+    admin_level: Option<String>,
+    admin_worlds: Option<String>,
+    where_: Option<String>,
+    new_password_env: Option<String>,
+    yes: bool,
     server_key: Option<String>,
     script_flag: bool,
     secure_login: bool,
@@ -211,6 +246,14 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--set-file" => o.set_file = Some(val!(&a)),
             "--reason" => o.reason = Some(val!(&a)),
             "--ip-range" => o.ip_range = Some(val!(&a)),
+            "--email" => o.email = Some(val!(&a)),
+            "--banned" => o.banned = Some(val!(&a)),
+            "--load-only" => o.load_only = Some(val!(&a)),
+            "--admin-level" => o.admin_level = Some(val!(&a)),
+            "--admin-worlds" => o.admin_worlds = Some(val!(&a)),
+            "--where" => o.where_ = Some(val!(&a)),
+            "--new-password-env" => o.new_password_env = Some(val!(&a)),
+            "--yes" => o.yes = true,
             "--server-key" => o.server_key = Some(val!(&a)),
             "--secure-login" => o.secure_login = true,
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
@@ -916,6 +959,208 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn on_off(name: &str, v: &Option<String>) -> Result<Option<bool>, String> {
+    match v.as_deref() {
+        None => Ok(None),
+        Some("on") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        Some(other) => Err(format!("{name}: expected on or off, got {other}")),
+    }
+}
+
+fn read_account(s: &mut Session, c: &Common, account: &str) -> Result<Account, String> {
+    let msg = account_get(account).map_err(|e| e.to_string())?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    await_reply(s, c, accounts_plo::RC_ACCOUNTGET, account, |p| {
+        parse_account(p).map(|a| (a.account.clone(), a))
+    })
+}
+
+fn read_account_list(
+    s: &mut Session,
+    c: &Common,
+    pattern: &str,
+    conditions: &str,
+) -> Result<Vec<String>, String> {
+    let msg = account_list(pattern, conditions).map_err(|e| e.to_string())?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    await_reply(s, c, accounts_plo::RC_ACCOUNTLISTGET, pattern, |p| {
+        parse_account_list(p).map(|l| (pattern.to_string(), l))
+    })
+}
+
+fn print_account(a: &Account) {
+    println!("account: {}", a.account);
+    println!("e-mail: {}", a.email);
+    println!("banned: {}", if a.banned { "yes" } else { "no" });
+    println!("load only: {}", if a.load_only { "yes" } else { "no" });
+    println!("admin level: {}", a.admin_level);
+    println!("admin worlds: {}", a.admin_worlds);
+    for line in &a.ban_reason {
+        println!("ban reason: {line}");
+    }
+}
+
+/// Read and drop what the server sends for `--settle` ms (default 1000).
+fn settle_quietly(s: &mut Session, o: &Opts, c: &Common) -> Result<(), String> {
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    s.settle(quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn cmd_accounts_list(o: &Opts, pattern: &str) -> Result<(), String> {
+    let conditions = o.where_.clone().unwrap_or_default();
+    account_list(pattern, &conditions).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let names = read_account_list(&mut s, &c, pattern, &conditions)?;
+    s.close();
+    for n in &names {
+        println!("{n}");
+    }
+    Ok(())
+}
+
+fn cmd_accounts_get(o: &Opts, account: &str) -> Result<(), String> {
+    account_get(account).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let a = read_account(&mut s, &c, account)?;
+    s.close();
+    print_account(&a);
+    Ok(())
+}
+
+/// Apply the field options to `a`. True when any was given.
+fn apply_account_fields(o: &Opts, a: &mut Account) -> Result<bool, String> {
+    let mut any = false;
+    if let Some(e) = &o.email {
+        a.email = e.clone();
+        any = true;
+    }
+    if let Some(b) = on_off("--banned", &o.banned)? {
+        a.banned = b;
+        any = true;
+    }
+    if let Some(b) = on_off("--load-only", &o.load_only)? {
+        a.load_only = b;
+        any = true;
+    }
+    if let Some(n) = &o.admin_level {
+        a.admin_level = n
+            .parse()
+            .map_err(|_| format!("--admin-level: not a level: {n}"))?;
+        any = true;
+    }
+    if let Some(w) = &o.admin_worlds {
+        a.admin_worlds = w.clone();
+        any = true;
+    }
+    if let Some(r) = &o.reason {
+        a.ban_reason = r.lines().map(str::to_string).collect();
+        any = true;
+    }
+    Ok(any)
+}
+
+fn cmd_accounts_set(o: &Opts, account: &str, add: bool) -> Result<(), String> {
+    let password = match &o.new_password_env {
+        Some(var) => {
+            let p = std::env::var(var).map_err(|_| format!("{var} is not set"))?;
+            if p.is_empty() {
+                return Err(format!("{var} is empty"));
+            }
+            p
+        }
+        None if add => return Err("accounts add needs --new-password-env".into()),
+        None => String::new(),
+    };
+    // Check every field before logging in.
+    // The RC's add dialog starts with admin worlds `all`; so does add.
+    let mut probe = Account {
+        account: account.to_string(),
+        admin_worlds: if add { "all".into() } else { String::new() },
+        ..Account::default()
+    };
+    let any = apply_account_fields(o, &mut probe)?;
+    if !add && !any && password.is_empty() {
+        return Err("accounts set: give at least one field to change".into());
+    }
+    account_set(&probe, &password).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let want = if add {
+        let a = probe;
+        let msg = account_add(&a, &password).map_err(|e| e.to_string())?;
+        s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+        // The fork answers a get or a list sent at once with what it had
+        // before the add, so wait --settle ms first.
+        settle_quietly(&mut s, o, &c)?;
+        a
+    } else {
+        let mut a = read_account(&mut s, &c, account)?;
+        apply_account_fields(o, &mut a)?;
+        let msg = account_set(&a, &password).map_err(|e| e.to_string())?;
+        s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+        a
+    };
+    let back = read_account(&mut s, &c, account)?;
+    s.close();
+    print_account(&back);
+    let mut lost = Vec::new();
+    if back.email != want.email {
+        lost.push("e-mail");
+    }
+    if back.banned != want.banned {
+        lost.push("banned");
+    }
+    if back.load_only != want.load_only {
+        lost.push("load only");
+    }
+    if back.admin_level != want.admin_level {
+        lost.push("admin level");
+    }
+    if back.admin_worlds != want.admin_worlds {
+        lost.push("admin worlds");
+    }
+    if back.ban_reason != want.ban_reason {
+        lost.push("ban reason");
+    }
+    let what = if add { "added" } else { "sent the changes for" };
+    if !lost.is_empty() {
+        return Err(format!(
+            "{what} {account}, but the server read back other values for: {}",
+            lost.join(", ")
+        ));
+    }
+    eprintln!("{} {account}", if add { "added" } else { "set" });
+    Ok(())
+}
+
+fn cmd_accounts_delete(o: &Opts, account: &str) -> Result<(), String> {
+    let msg = account_delete(account).map_err(|e| e.to_string())?;
+    if !o.yes {
+        return Err(format!(
+            "deleting {account} cannot be undone; add --yes to delete it"
+        ));
+    }
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    // As for add: a list sent at once still has the account.
+    settle_quietly(&mut s, o, &c)?;
+    let left = read_account_list(&mut s, &c, account, "")?;
+    s.close();
+    if left.iter().any(|n| n.eq_ignore_ascii_case(account)) {
+        return Err(format!(
+            "sent the delete for {account}, but the server still lists it"
+        ));
+    }
+    println!("deleted {account}");
+    Ok(())
+}
+
 fn cmd_players_kick(o: &Opts, who: &str) -> Result<(), String> {
     let (mut s, c) = players_session(o)?;
     let e = resolve(&s.players, who)?.clone();
@@ -1411,6 +1656,12 @@ fn main() -> ExitCode {
         ["players", "ban", account] => cmd_players_ban(&o, account),
         ["players", "rights", account] => cmd_players_rights(&o, account),
         ["players", "props", who] => cmd_players_props(&o, who),
+        ["accounts", "list"] => cmd_accounts_list(&o, "%"),
+        ["accounts", "list", pattern] => cmd_accounts_list(&o, pattern),
+        ["accounts", "get", account] => cmd_accounts_get(&o, account),
+        ["accounts", "set", account] => cmd_accounts_set(&o, account, false),
+        ["accounts", "add", account] => cmd_accounts_set(&o, account, true),
+        ["accounts", "delete", account] => cmd_accounts_delete(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),

@@ -186,6 +186,26 @@ answering after a ban set on an online player (seen once); at `1d7843a` it
 disconnects the player with 16 and goes on answering. `players ban` still
 fails with "no reply" rather than waiting forever.
 
+## Accounts (stage 3)
+
+`seihai-rc accounts list`, `get`, `set`, `add` and `delete`. Seen from a
+real RC (`GSERV024`) against the fork, one field per apply, then run
+with `seihai-rc`: `docs/lab/2026-11-04-rc-accounts.md`.
+
+| Action | Client to server | Server to client |
+|---|---|---|
+| List | 72 `RC_ACCOUNTLISTGET`: GSTRING name pattern (`%` matches any), GSTRING conditions (`adminlevel>0`, may be empty) | 70: a GSTRING per account to the end; empty when none match |
+| Get | 77 `RC_ACCOUNTGET`: the account as the rest of the line | 73: GSTRING account, GSTRING password (empty), GSTRING e-mail, GCHAR banned, GCHAR load only, GCHAR admin level, GSTRING admin worlds, one byte (0x20 in every capture), GSTRING ban reason tokenized |
+| Set | 78 `RC_ACCOUNTSET`: as 73 without the byte before the reason; an empty password leaves it | no reply; `accounts set` reads back with 77 |
+| Add | 70 `RC_ACCOUNTADD`: as 78 | no reply; `accounts add` reads back with 77 |
+| Delete | 71 `RC_ACCOUNTDEL`: the account as the rest of the line | no reply; `accounts delete` lists the name |
+
+The RC's dialog has a ban time, but the RC sent none, even with one
+typed in. `seihai-rc` sends none either. The fork answers a get or list
+sent right after an add or delete with what it had before, so those two
+commands wait `--settle` ms before reading back. The fork does not keep
+load only, admin level or admin worlds from 78 or 70.
+
 ## NPC Control
 
 A second socket from the RC game-server link. Layouts follow the behaviour
