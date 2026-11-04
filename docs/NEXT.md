@@ -46,6 +46,15 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 `players kick ID`, `players warp ID LEVEL X Y`, `players props ID`,
 `players rights ACCOUNT [--set ...]`, `players ban ACCOUNT [--set ...]`.
 
+- [x] First slice: `players pm`, `players say`, `players kick`,
+      `players warp` (ids 28, 63, 61, 82). Who may be an id or an account
+      from the player list. Every layout is **check**; see the player
+      actions section of `docs/PROTOCOL.md`. Evidence: unit tests in
+      `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
+      No real client. The fork was not run (lab pack not available).
+- [ ] Private admin message (64), props (73/74/76 → 72), rights,
+      comments, local ban, list RCs (65).
+
 ## Stage 3: accounts
 
 `PLI_RC_ACCOUNTLISTGET` (72, with a filter) → `PLO_RC_ACCOUNTLISTGET` (70);

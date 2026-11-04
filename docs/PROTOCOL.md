@@ -95,6 +95,34 @@ The player-list form (id 7, and a list name such as `newmain` after the
 client key) is not sent. A listserver that only treats id 7 as `SEI00001`
 will not answer this client.
 
+## Player actions (stage 2, first slice)
+
+`seihai-rc players pm`, `say`, `kick` and `warp`. Every layout here is
+**check**: it is what this client sends, written from the stage-2 table in
+`docs/NEXT.md`, and no fork lab run has confirmed it yet. Each command
+logs in, waits `--settle` ms for the player list, and refuses a player id
+or account that is not in it before anything is sent.
+
+| Action | Client to server | What the command waits for |
+|---|---|---|
+| Private message | 28 `PRIVATEMESSAGE`: GSHORT count, that many GSHORT player ids, then the text as the rest of the line | nothing; it reads for `--settle` ms and fails only if the link closes |
+| Message all | 63 `RC_ADMINMESSAGE`: the text as the rest of the line | as above |
+| Disconnect | 61 `RC_DISCONNECTPLAYER`: GSHORT player id, nothing after it | 56 `DELPLAYER` for that id; without it the command fails |
+| Warp | 82 `RC_WARPPLAYER`: GSHORT player id, GCHAR x, GCHAR y (both in half tiles, as the level warp messages carry them), then the level name as the rest of the line | nothing; an `ADDPLAYER` resend for that id is printed as `[update]` |
+
+Text and level names are Latin-1. A line break is refused, as it would end
+the message. An empty text or level name is refused. A player id over 14
+bits does not fit a GSHORT and is refused. X and Y must be 0 to 111.5 in
+steps of 0.5. `warp` refuses an RC entry (level of one space).
+
+Still needs a lab check:
+
+- Whether the fork reads the PM text as plain text or wants it quoted.
+- Whether 61 needs a reason text after the id.
+- The widths of x and y in 82 (GCHAR half tiles here), and whether the
+  level comes before them.
+- What, if anything, the fork sends the RC after 28, 63 and 82.
+
 ## NPC Control
 
 A second socket from the RC game-server link. Layouts follow the behaviour

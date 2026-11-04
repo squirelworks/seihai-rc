@@ -9,12 +9,13 @@ use seihai_rc::nc::{
     npc_get_message, npc_script_get_message, npc_script_set_message, weapon_delete_message,
     weapon_get_message, weapon_list_message, weapon_set_message, NcEvent, NcSession,
 };
+use seihai_rc::players::{admin_message, disconnect_player, private_message, resolve, warp_player};
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
 };
 
 const USAGE: &str = "\
-seihai-rc: Graal Remote Control client (stage 1, plus NPC Control)
+seihai-rc: Graal Remote Control client (stage 1, player actions, NPC Control)
 
 USAGE:
   seihai-rc servers --listserver HOST:PORT --account NAME [options]
@@ -22,6 +23,10 @@ USAGE:
                     --account NAME [--for SECS] [--say TEXT] [options]
   seihai-rc players list (--server ... | --listserver ... --pick ...)
                     --account NAME [--tsv] [--settle MS] [options]
+  seihai-rc players pm WHO[,WHO...] TEXT... (--server ... | --listserver ... --pick ...)
+  seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
+  seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
+  seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
   seihai-rc nc login --server HOST:PORT --account NAME [--for SECS] [options]
   seihai-rc nc npcs (--server HOST:PORT | --discover HOST:PORT) --account NAME
@@ -42,6 +47,15 @@ USAGE:
                 chat for --for seconds (default 5; 0 = until the server
                 closes the link). --say sends one RC chat line first.
   players list  Log in and print the players and RCs online.
+  players pm    Private message (id 28) to one or more players or RCs.
+  players say   Admin message to everyone online (id 63).
+  players kick  Disconnect a player (id 61) and wait for it to leave (56).
+  players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
+                such as 30.5 are allowed.
+                WHO is a player id or an account name; the client reads the
+                player list first (--settle) and refuses a WHO not in it.
+                The payloads for 28, 61, 63 and 82 still need a fork lab
+                check; see docs/PROTOCOL.md.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -74,8 +88,8 @@ OPTIONS:
                        GSERV023 for classic).
   --nick NAME          Nickname to send after the login.
   --timeout SECS       Connect and login timeout (default 10).
-  --settle MS          players list: wait until no message came for this
-                       long before printing (default 1000).
+  --settle MS          players: wait until no message came for this
+                       long before printing or acting (default 1000).
   --discover HOST:PORT On nc commands other than discover: game server to
                        ask for the NPC-server address before connecting.
   --script TEXT        Script for npc set, class set and weapon set.
@@ -428,6 +442,114 @@ fn cmd_players_list(o: &Opts) -> Result<(), String> {
         println!("{n} player(s), {r} other RC(s)");
     }
     s.close();
+    Ok(())
+}
+
+/// Log in and let the player list arrive, for a `players` action.
+fn players_session(o: &Opts) -> Result<(Session, Common), String> {
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    s.settle(quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    Ok((s, c))
+}
+
+/// Send one action, then read what the server says for `--settle` ms.
+fn send_and_settle(
+    s: &mut Session,
+    o: &Opts,
+    c: &Common,
+    msg: Vec<u8>,
+) -> Result<Vec<Event>, String> {
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    let events = s
+        .settle(quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    for ev in &events {
+        if let Event::Disconnect(why) = ev {
+            return Err(format!("the server closed the link: {why}"));
+        }
+        if o.verbose {
+            print_event(ev, true);
+        }
+    }
+    Ok(events)
+}
+
+fn cmd_players_pm(o: &Opts, who: &str, words: &[&str]) -> Result<(), String> {
+    let text = words.join(" ");
+    let (mut s, c) = players_session(o)?;
+    let mut ids = Vec::new();
+    for one in who.split(',') {
+        let e = resolve(&s.players, one.trim())?;
+        if !ids.contains(&e.id) {
+            ids.push(e.id);
+        }
+    }
+    let msg = private_message(&ids, &text).map_err(|e| e.to_string())?;
+    send_and_settle(&mut s, o, &c, msg)?;
+    let list: Vec<String> = ids.iter().map(u16::to_string).collect();
+    println!("sent private message to {}", list.join(","));
+    s.close();
+    Ok(())
+}
+
+fn cmd_players_say(o: &Opts, words: &[&str]) -> Result<(), String> {
+    let msg = admin_message(&words.join(" ")).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    send_and_settle(&mut s, o, &c, msg)?;
+    println!("sent admin message");
+    s.close();
+    Ok(())
+}
+
+fn cmd_players_kick(o: &Opts, who: &str) -> Result<(), String> {
+    let (mut s, c) = players_session(o)?;
+    let e = resolve(&s.players, who)?.clone();
+    let msg = disconnect_player(e.id).map_err(|e| e.to_string())?;
+    let events = send_and_settle(&mut s, o, &c, msg)?;
+    s.close();
+    if events
+        .iter()
+        .any(|ev| matches!(ev, Event::DelPlayer(id) if *id == e.id))
+    {
+        println!("disconnected {} {}", e.id, e.account);
+        Ok(())
+    } else {
+        Err(format!(
+            "sent disconnect for {} {}, but no DELPLAYER (id 56) for it arrived",
+            e.id, e.account
+        ))
+    }
+}
+
+fn parse_tiles(axis: &str, v: &str) -> Result<f32, String> {
+    v.parse::<f32>()
+        .map_err(|_| format!("{axis}: not a number: {v}"))
+}
+
+fn cmd_players_warp(o: &Opts, who: &str, level: &str, x: &str, y: &str) -> Result<(), String> {
+    let (x, y) = (parse_tiles("X", x)?, parse_tiles("Y", y)?);
+    // Check the bytes before logging in, so a bad X or Y costs nothing.
+    warp_player(0, level, x, y).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    let e = resolve(&s.players, who)?.clone();
+    if e.is_rc() {
+        return Err(format!("{} {} is an RC, not a player", e.id, e.account));
+    }
+    let msg = warp_player(e.id, level, x, y).map_err(|e| e.to_string())?;
+    let events = send_and_settle(&mut s, o, &c, msg)?;
+    s.close();
+    println!("sent warp for {} {} to {level} {x} {y}", e.id, e.account);
+    for ev in &events {
+        if let Event::UpdatePlayer(now) = ev {
+            if now.id == e.id {
+                println!("{}", player_line("update", now));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -869,6 +991,10 @@ fn main() -> ExitCode {
         ["servers"] => cmd_servers(&o),
         ["login"] => cmd_login(&o),
         ["players", "list"] | ["players"] => cmd_players_list(&o),
+        ["players", "pm", who, words @ ..] if !words.is_empty() => cmd_players_pm(&o, who, words),
+        ["players", "say", words @ ..] if !words.is_empty() => cmd_players_say(&o, words),
+        ["players", "kick", who] => cmd_players_kick(&o, who),
+        ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),
         ["nc", "discover"] => cmd_nc_discover(&o),
         ["nc", "npcs"] | ["nc", "npc", "list"] => cmd_nc_npcs(&o),
@@ -918,6 +1044,22 @@ mod tests {
         assert_eq!(o.server.as_deref(), Some("127.0.0.1:14802"));
         assert!(o.tsv);
         assert_eq!(o.settle, Some(200));
+    }
+
+    #[test]
+    fn parses_players_actions() {
+        let o = parse_args(args(
+            "players warp alice cave.nw 30.5 12 --server 127.0.0.1:14802",
+        ))
+        .unwrap();
+        assert_eq!(o.cmd, ["players", "warp", "alice", "cave.nw", "30.5", "12"]);
+        let o = parse_args(args(
+            "players pm 2,bob hello there --server 127.0.0.1:14802",
+        ))
+        .unwrap();
+        assert_eq!(o.cmd, ["players", "pm", "2,bob", "hello", "there"]);
+        assert_eq!(parse_tiles("X", "30.5"), Ok(30.5));
+        assert!(parse_tiles("X", "east").is_err());
     }
 
     #[test]
