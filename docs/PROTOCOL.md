@@ -97,9 +97,9 @@ will not answer this client.
 
 ## Player actions (stage 2)
 
-`seihai-rc players pm`, `say`, `admin-pm`, `kick` and `warp`. Every layout here is
-**check**: it is what this client sends, written from the stage-2 table in
-`docs/NEXT.md`, and no fork lab run has confirmed it yet. Each command
+`seihai-rc players pm`, `say`, `admin-pm`, `kick` and `warp`. Each layout
+here was confirmed by `seihai-rc` itself against the fork (`seihai` at
+`1d7843a`) on 2026-11-04: `docs/lab/2026-11-04-live-fork-run.md`. Each command
 logs in, waits `--settle` ms for the player list, and refuses a player id
 or account that is not in it before anything is sent.
 
@@ -116,21 +116,26 @@ the message. An empty text or level name is refused. A player id over 14
 bits does not fit a GSHORT and is refused. X and Y must be 0 to 111.5 in
 steps of 0.5. `warp` refuses an RC entry (level of one space).
 
-Still needs a lab check:
+What the fork did with them in that run:
 
-- Whether 61 needs a reason text after the id.
-- Whether 64 shows the text to that player the way 35 shows an admin
-  message to everyone (`Admin <account>:`, `0xA7`, then the text, per
-  Graal_analysis `protocol/chat-pm-rc.md`), and whether a `0xA7` in our
-  text would be read as a line break there.
-- The widths of x and y in 82 (GCHAR half tiles here), and whether the
-  level comes before them.
-- What, if anything, the fork sends the RC after 28, 63 and 82.
+- 28: the player got 37 with the text as the last tokenized item.
+- 63 and 64: the player got 35, `Admin <account>:`, `0xA7`, then the
+  text. 64 goes only to the one player.
+- 61: no reason text is needed. The player got 16 with the fork's own
+  text, and the RC got 56 for that id.
+- 82: the fork read x and y as GCHAR half tiles and the level after them,
+  and logged the warp. The player, already in that level, got no message.
+- The RC got nothing back after 28, 63, 64 or 82.
+
+Still needs a lab check: whether a `0xA7` in our text is read as a line
+break by the player, and what the player gets on a warp to another level.
 
 ### Comments, account ban, rights and props
 
 Seen on the wire from a real RC (`GSERV024`) against the fork on
-2026-11-04: `docs/lab/2026-11-04-rc-player-admin.md`. Tokenized text is
+2026-11-04: `docs/lab/2026-11-04-rc-player-admin.md`. `seihai-rc` then
+ran each get and set below (not 76) live against the fork the same day:
+`docs/lab/2026-11-04-live-fork-run.md`. Tokenized text is
 one item per line, each quoted with `"` doubled, joined with commas;
 `seihai-rc` reads unquoted items too.
 
@@ -147,10 +152,11 @@ one item per line, each quoted with `"` doubled, joined with commas;
 
 GINT5 is five GCHARs, high 7 bits first. Rights bits follow the RC
 dialog's checkbox order from bit 0; the capture confirms bit 0
-(warp-to-xy) and bit 9 (admin message). The fork returns the folder
-rights untokenized (`rw levels/*`), and the real RC splits that at the
-space. `seihai-rc` reads an unquoted item up to the next comma, so it
-keeps the line whole, and it always sends the lines tokenized.
+(warp-to-xy) and bit 9 (admin message). The fork at `f585ca6` returned
+the folder rights untokenized (`rw levels/*`), and the real RC split that
+at the space; the fork at `1d7843a` returns them tokenized. `seihai-rc`
+reads an unquoted item up to the next comma, so it keeps the line whole
+from either, and it always sends the lines tokenized.
 
 Props are read with `seihai-core`'s player prop table. Both tail GSHORTs
 were 0 in the capture; which counts flags and which opened chests, and
@@ -159,9 +165,10 @@ read the weapons when either is not 0. The real RC's 76 left out props 0,
 30, 34 and 36, added 7 and 21 to 23, and sent online seconds as 0, so
 `seihai-rc` does not send 76 until those choices are understood.
 
-The reason in 64 was only seen empty, and is read as tokenized text. The
-fork stopped answering after a ban set on an online player (seen once), so
-`players ban` fails with "no reply" rather than waiting forever.
+The reason in 64 is read as tokenized text. The fork at `f585ca6` stopped
+answering after a ban set on an online player (seen once); at `1d7843a` it
+disconnects the player with 16 and goes on answering. `players ban` still
+fails with "no reply" rather than waiting forever.
 
 ## NPC Control
 
