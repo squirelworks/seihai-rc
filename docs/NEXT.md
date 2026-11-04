@@ -68,8 +68,12 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       tokenized lines, so the fork's untokenized `rw levels/*` stays one
       line. Evidence: the same lab note; `tests/fake_servers.rs` checks the
       84 bytes against the capture.
-- [ ] Props (73/76 → 72): layout in the same lab note. Still to check:
-      which tail GSHORT is flags and which chests, and 76's extra byte.
+- [x] Props read (73 → 72): `players props WHO`. Evidence: the captured
+      72 decodes in a unit test and through the fake gserver.
+- [ ] Props set (76). Layout seen (lab note), but the real RC drops and
+      adds props and zeroes online seconds; work out which props a set
+      should carry, then send it. Also: which tail GSHORT is flags and
+      which chests, and props by account (74, not captured).
 - [ ] List RCs (65). Not in the 2026-11-04 capture.
 
 ## Stage 3: accounts

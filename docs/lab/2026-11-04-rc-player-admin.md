@@ -67,7 +67,18 @@ bug: a server should return the text tokenized, the way it came in.
 
 Tail, both ways: GSHORT 0, GSHORT 0, GCHAR weapon count, then a GSTRING
 per weapon (`bomb`, `bow`, `-gr_movement`). Still to check: which GSHORT
-counts flags and which opened chests (both were 0), and the extra byte on
-76. The server sent props 0 to 36 (144 bytes); the RC sent back the same
-ids without 0, 30, 34 and 36 and with 21, 22 and 23 (one byte each, 0).
-Changing Gralats changed only prop 3, and the readback showed 7.
+counts flags and which opened chests (both were 0). The server sent props
+0 to 36 (144 bytes); the RC sent back the same ids without 0, 30, 34 and
+36 and with 21, 22 and 23 (one byte each, 0). Changing Gralats changed
+prop 3, and the readback showed 7.
+
+Decoding the pcap again with `seihai-rc`'s own gen-5 codec (key from the
+login frame) adds these details:
+
+- The props length is a GCHAR (value + 32): `\xb0` = 144 in 72 and
+  `\x9d` = 125 in 76.
+- The extra byte at the end of 76 is a GCHAR 0 (a space, `0x20`).
+- 76 also carries prop 7 (`'!`, value 1), which 72 did not send.
+- 76 sends prop 29, online seconds, as GINT3 0, where 72 had 475. So the
+  RC does not echo every prop it read; which fields its dialog writes
+  back still needs a look before a client sends 76.

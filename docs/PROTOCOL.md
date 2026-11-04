@@ -127,7 +127,7 @@ Still needs a lab check:
   level comes before them.
 - What, if anything, the fork sends the RC after 28, 63 and 82.
 
-### Comments, account ban and rights
+### Comments, account ban, rights and props
 
 Seen on the wire from a real RC (`GSERV024`) against the fork on
 2026-11-04: `docs/lab/2026-11-04-rc-player-admin.md`. Tokenized text is
@@ -142,6 +142,8 @@ one item per line, each quoted with `"` doubled, joined with commas;
 | Ban set | 88 `RC_PLAYERBANSET`: GSTRING account, GCHAR banned, then the reason tokenized | no reply; `players ban --set` reads it back with 87 |
 | Rights get | 83 `RC_PLAYERRIGHTSGET`: the account as the rest of the line | 62: GSTRING account, GINT5 rights, GSTRING IP range, GSHORT length, then that many bytes of folder rights tokenized |
 | Rights set | 84 `RC_PLAYERRIGHTSSET`: same as 62 | no reply; `players rights --set` reads them back with 83 |
+| Props get | 73 `RC_PLAYERPROPSGET2`: GSHORT player id | 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR props length N, N bytes of props, GSHORT, GSHORT, GCHAR weapon count, a GSTRING per weapon |
+| Props set | 76 `RC_PLAYERPROPSSET2`: GSTRING account (no player id), GSTRING world, GCHAR length N, N bytes of props, the same tail, then a GCHAR 0 | **not sent by this client yet** |
 
 GINT5 is five GCHARs, high 7 bits first. Rights bits follow the RC
 dialog's checkbox order from bit 0; the capture confirms bit 0
@@ -149,6 +151,13 @@ dialog's checkbox order from bit 0; the capture confirms bit 0
 rights untokenized (`rw levels/*`), and the real RC splits that at the
 space. `seihai-rc` reads an unquoted item up to the next comma, so it
 keeps the line whole, and it always sends the lines tokenized.
+
+Props are read with `seihai-core`'s player prop table. Both tail GSHORTs
+were 0 in the capture; which counts flags and which opened chests, and
+what follows a non-zero count, is not known, so `players props` does not
+read the weapons when either is not 0. The real RC's 76 left out props 0,
+30, 34 and 36, added 7 and 21 to 23, and sent online seconds as 0, so
+`seihai-rc` does not send 76 until those choices are understood.
 
 The reason in 64 was only seen empty, and is read as tokenized text. The
 fork stopped answering after a ban set on an online player (seen once), so
