@@ -147,8 +147,9 @@ one item per line, each quoted with `"` doubled, joined with commas;
 | Ban set | 88 `RC_PLAYERBANSET`: GSTRING account, GCHAR banned, then the reason tokenized | no reply; `players ban --set` reads it back with 87 |
 | Rights get | 83 `RC_PLAYERRIGHTSGET`: the account as the rest of the line | 62: GSTRING account, GINT5 rights, GSTRING IP range, GSHORT length, then that many bytes of folder rights tokenized |
 | Rights set | 84 `RC_PLAYERRIGHTSSET`: same as 62 | no reply; `players rights --set` reads them back with 83 |
-| Props get | 73 `RC_PLAYERPROPSGET2`: GSHORT player id | 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR props length N, N bytes of props, GSHORT, GSHORT, GCHAR weapon count, a GSTRING per weapon |
-| Props set | 76 `RC_PLAYERPROPSSET2`: GSTRING account (no player id), GSTRING world, GCHAR length N, N bytes of props, the same tail, then a GCHAR 0 | **not sent by this client yet** |
+| Props get | 73 `RC_PLAYERPROPSGET2`: GSHORT player id | 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR props length N, N bytes of props, GSHORT flag count and a GSTRING per flag, GSHORT opened-chest count, GCHAR weapon count, a GSTRING per weapon |
+| Props get by account | 74 `RC_PLAYERPROPSGET3`: GSTRING account, then an empty GSTRING | 72, as above, with player id 0 |
+| Props set | 76 `RC_PLAYERPROPSSET2`: GSTRING account (no player id), GSTRING world, GCHAR length N, N bytes of props, the same tail as 72, then a GCHAR 0 | no reply; `players props --set` reads them back with 73 or 74 |
 
 GINT5 is five GCHARs, high 7 bits first. Rights bits follow the RC
 dialog's checkbox order from bit 0; the capture confirms bit 0
@@ -158,12 +159,27 @@ at the space; the fork at `1d7843a` returns them tokenized. `seihai-rc`
 reads an unquoted item up to the next comma, so it keeps the line whole
 from either, and it always sends the lines tokenized.
 
-Props are read with `seihai-core`'s player prop table. Both tail GSHORTs
-were 0 in the capture; which counts flags and which opened chests, and
-what follows a non-zero count, is not known, so `players props` does not
-read the weapons when either is not 0. The real RC's 76 left out props 0,
-30, 34 and 36, added 7 and 21 to 23, and sent online seconds as 0, so
-`seihai-rc` does not send 76 until those choices are understood.
+Props are read with `seihai-core`'s player prop table. The tail after
+the props was settled by a second capture (2026-11-04,
+`docs/lab/2026-11-04-rc-props-set.md`): the real RC sent a flag as GSHORT
+1 then the GSTRING `labflag=1`, so the first GSHORT counts flags and the
+second opened chests. Only a chest count of 0 has been seen, so
+`players props` does not read the weapons after a non-zero one, and a set
+from such a reply is refused.
+
+Both captured 76s carry the same props, in this order: 1 to 11, 13, 15,
+16, 18, 20 to 23, 26 to 29, 32 and 35. They leave out 0 (nickname), 30
+(last IP), 34 (account) and 36 (rating), send 7 (bomb power) as 1 and
+21 to 23 as empty when the 72 had none, and send 29 (online seconds) as
+0; the fork keeps its own online seconds. `seihai-rc` builds 76 the same
+way from the 72 it just read, with the user's changes, and from the
+captured 72 it rebuilds the captured 76 byte for byte.
+
+The fork's 72 always has a flag count of 0, even for an account with
+flags stored, and a 76 replaces the stored flags with the ones it
+carries. So any props set through the fork, the real RC's included, drops
+the account's flags. `players props --set` says so when the reply had no
+flags.
 
 The reason in 64 is read as tokenized text. The fork at `f585ca6` stopped
 answering after a ban set on an online player (seen once); at `1d7843a` it
