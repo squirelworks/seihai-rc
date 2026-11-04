@@ -11,8 +11,8 @@ use seihai_rc::nc::{
 };
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
-    parse_comments, parse_rights, plo as players_plo, private_admin_message, private_message,
-    resolve, rights_get, rights_set, warp_player, Rights,
+    parse_comments, parse_props, parse_rights, plo as players_plo, private_admin_message,
+    private_message, prop_name, props_get, resolve, rights_get, rights_set, warp_player, Rights,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -33,6 +33,7 @@ USAGE:
   seihai-rc players comments ACCOUNT [--set TEXT | --set-file PATH] (--server ... | ...)
   seihai-rc players ban ACCOUNT [--set on|off [--reason TEXT]] (--server ... | ...)
   seihai-rc players rights ACCOUNT [--set N] [--ip-range R] [--set-file PATH] (--server ...)
+  seihai-rc players props WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
@@ -73,6 +74,8 @@ USAGE:
                 and --set-file (folder rights, one per line) change those
                 fields, keep the rest, send id 84 and read them back.
                 Bit 0 is warp-to-xy and bit 9 admin message.
+  players props Print a player's props, counts and weapons (id 73, reply
+                72). Setting props (id 76) is not sent yet.
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
@@ -760,6 +763,70 @@ fn cmd_players_rights(o: &Opts, account: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A prop value for people: text when the bytes are a GSTRING that fills
+/// the value, a number for one byte or a GINT3, and escaped bytes otherwise.
+fn prop_value(id: u8, raw: &[u8]) -> String {
+    let n = |b: &u8| u32::from(b.wrapping_sub(0x20) & 0x7F);
+    let gstring = raw.len() > 1 && usize::from(raw[0].wrapping_sub(0x20)) == raw.len() - 1;
+    match raw {
+        [b] => n(b).to_string(),
+        [a, b, c] if !gstring || matches!(id, 3 | 27 | 28 | 29 | 36) => {
+            ((n(a) << 14) | (n(b) << 7) | n(c)).to_string()
+        }
+        _ if gstring => seihai_rc::wire::text(&raw[1..]),
+        _ => raw
+            .iter()
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("\\x{b:02x}")
+                }
+            })
+            .collect(),
+    }
+}
+
+fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
+    let (mut s, c) = players_session(o)?;
+    let e = resolve(&s.players, who)?.clone();
+    if e.is_rc() {
+        return Err(format!("{} {} is an RC, not a player", e.id, e.account));
+    }
+    let msg = props_get(e.id).map_err(|e| e.to_string())?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    let r = await_reply(
+        &mut s,
+        &c,
+        players_plo::RC_PLAYERPROPSGET,
+        &e.account,
+        |p| {
+            parse_props(p)
+                .filter(|r| r.id == e.id)
+                .map(|r| (r.account.clone(), r))
+        },
+    )?;
+    s.close();
+    println!("player {} account {} world {}", r.id, r.account, r.world);
+    for p in &r.props {
+        println!(
+            "{:>4}  {:<20}  {}",
+            p.id,
+            prop_name(p.id).unwrap_or("?"),
+            prop_value(p.id, &p.raw)
+        );
+    }
+    if !r.props_complete {
+        println!("(the props block holds more than the prop table could read)");
+    }
+    println!("tail counts: {} {}", r.tail_counts.0, r.tail_counts.1);
+    match &r.weapons {
+        Some(w) => println!("weapons: {}", w.join(", ")),
+        None => println!("weapons: not read (a tail count is not 0; that layout is not known)"),
+    }
+    Ok(())
+}
+
 fn cmd_players_kick(o: &Opts, who: &str) -> Result<(), String> {
     let (mut s, c) = players_session(o)?;
     let e = resolve(&s.players, who)?.clone();
@@ -1254,6 +1321,7 @@ fn main() -> ExitCode {
         ["players", "comments", account] => cmd_players_comments(&o, account),
         ["players", "ban", account] => cmd_players_ban(&o, account),
         ["players", "rights", account] => cmd_players_rights(&o, account),
+        ["players", "props", who] => cmd_players_props(&o, who),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),
@@ -1327,6 +1395,15 @@ mod tests {
     fn rights_bits_are_listed() {
         assert_eq!(bit_list(513), "0, 9");
         assert_eq!(bit_list(0), "none");
+    }
+
+    #[test]
+    fn prop_values_read_as_text_or_numbers() {
+        assert_eq!(prop_value(0, b"(Lab222rc"), "Lab222rc");
+        assert_eq!(prop_value(3, b"  '"), "7");
+        assert_eq!(prop_value(29, &[0x20, 0x23, 0x7b]), "475");
+        assert_eq!(prop_value(1, b"#"), "3");
+        assert_eq!(prop_value(13, &[0x20, 0x9f]), " \\x9f");
     }
 
     #[test]

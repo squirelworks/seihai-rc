@@ -532,6 +532,25 @@ fn rc_list_refused() {
 // it answers id 61 with DELPLAYER (56) for that id, the way a server that
 // drops the player would tell its RCs.
 
+/// The id 72 from the 2026-11-04 capture, after its player id and account.
+const CAPTURED_72_AFTER_ACCOUNT: [u8; 177] = {
+    const HEX: &[u8] = b"246d61696eb020284c616232323272632123222623202020242a25252621283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5c305d323434336f6e6c696e6573746172746c6f63616c2e6e773a203b2020203c2020203d20237b3e202820209f4054422574657374314328626f64792e706e67444e927e202020202324626f6d6223626f772c2d67725f6d6f76656d656e74";
+    const fn nib(c: u8) -> u8 {
+        if c <= b'9' {
+            c - b'0'
+        } else {
+            c - b'a' + 10
+        }
+    }
+    let mut out = [0u8; 177];
+    let mut i = 0;
+    while i < 177 {
+        out[i] = (nib(HEX[2 * i]) << 4) | nib(HEX[2 * i + 1]);
+        i += 1;
+    }
+    out
+};
+
 fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Message>>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap().to_string();
@@ -592,6 +611,13 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
                         send_msgs(&mut s, &mut codec, &[r]);
                     }
                     84 => rights = after_account(&m.payload).1,
+                    73 => {
+                        // The captured 72, for the player asked about.
+                        let mut r = m.payload.clone();
+                        push_gstring(&mut r, b"bob");
+                        r.extend_from_slice(&CAPTURED_72_AFTER_ACCOUNT);
+                        send_msgs(&mut s, &mut codec, &[message(72, &r)]);
+                    }
                     _ => {}
                 }
                 seen.push(m);
@@ -833,4 +859,22 @@ fn players_rights_set_keeps_the_other_fields() {
     // The bytes the real RC sent in the 2026-11-04 capture: the folder
     // line goes back tokenized even though the fork sent it bare.
     assert_eq!(seen[1].payload, b"%test1   $!'0.0.0.0 -\"rw levels/*\"");
+}
+
+#[test]
+fn players_props_prints_the_captured_reply() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["props", "bob"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.starts_with("player 3 account bob world main\n"),
+        "{out}"
+    );
+    assert!(out.contains("   3  gralats               0\n"), "{out}");
+    assert!(out.contains("  29  online seconds        475\n"), "{out}");
+    assert!(out.contains("weapons: bomb, bow, -gr_movement"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].id, 73);
+    assert_eq!(seen[0].payload, b" #");
 }

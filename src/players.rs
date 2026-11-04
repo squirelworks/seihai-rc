@@ -1,9 +1,10 @@
 //! Stage 2: player actions. Built so far: private messages, the admin
 //! message to everyone and to one player, disconnect, warp, and the
-//! comments, account ban and rights of an account. Props come next.
+//! comments, account ban and rights of an account, and reading a player's
+//! props. Setting props (76) is not sent yet; see `docs/PROTOCOL.md`.
 //!
-//! Comments (85/86 → 63), the ban (87/88 → 64) and rights (83/84 → 62)
-//! follow the 2026-11-04
+//! Comments (85/86 → 63), the ban (87/88 → 64), rights (83/84 → 62) and
+//! props (73 → 72) follow the 2026-11-04
 //! loopback capture of a real RC (`GSERV024`) against the gserver-v2 fork:
 //! `docs/lab/2026-11-04-rc-player-admin.md`.
 //!
@@ -361,6 +362,101 @@ pub fn parse_rights(payload: &[u8]) -> Option<Rights> {
     })
 }
 
+/// Id 73, `PLI_RC_PLAYERPROPSGET2`: GSHORT player id (capture, 2026-11-04).
+pub fn props_get(id: u16) -> Result<Vec<u8>, PlayerError> {
+    check_id(id)?;
+    let mut payload = Vec::with_capacity(2);
+    push_gshort(&mut payload, id);
+    Ok(message(pli::RC_PLAYERPROPSGET2, &payload))
+}
+
+/// Id 72, `PLO_RC_PLAYERPROPSGET`, as far as the capture shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropsReply {
+    pub id: u16,
+    pub account: String,
+    pub world: String,
+    /// The props block, decoded with `seihai-core`'s prop table. Decoding
+    /// stops at the first id that table does not know.
+    pub props: Vec<seihai_core::protocol::PlayerProp>,
+    /// True when the props block decoded to its last byte.
+    pub props_complete: bool,
+    /// The two GSHORTs after the props. Both were 0 in the capture, so
+    /// which one counts flags and which opened chests is not known.
+    pub tail_counts: (u16, u16),
+    /// The weapon names. `None` when a tail count is not 0: the entries
+    /// after a count have not been seen, so the weapons cannot be found.
+    pub weapons: Option<Vec<String>>,
+}
+
+/// Read id 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR
+/// props length N, N bytes of props, GSHORT, GSHORT, GCHAR weapon count,
+/// then a GSTRING per weapon.
+pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
+    use seihai_core::protocol::{parse_player_props, read_gshort};
+    let id = read_gshort(payload)?;
+    let mut i = 2;
+    let account = text(&read_gstring(payload, &mut i)?);
+    let world = text(&read_gstring(payload, &mut i)?);
+    let block = read_gstring(payload, &mut i)?;
+    let props = parse_player_props(&block);
+    let used: usize = props.iter().map(|p| 1 + p.raw.len()).sum();
+    let first = read_gshort(payload.get(i..)?)?;
+    let second = read_gshort(payload.get(i + 2..)?)?;
+    i += 4;
+    let weapons = if first == 0 && second == 0 {
+        let n = payload.get(i)?.wrapping_sub(0x20);
+        i += 1;
+        let mut names = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            names.push(text(&read_gstring(payload, &mut i)?));
+        }
+        Some(names)
+    } else {
+        None
+    };
+    Some(PropsReply {
+        id,
+        account,
+        world,
+        props_complete: used == block.len(),
+        props,
+        tail_counts: (first, second),
+        weapons,
+    })
+}
+
+/// A short name for the player prop ids seen in the 2026-11-04 capture.
+pub fn prop_name(id: u8) -> Option<&'static str> {
+    Some(match id {
+        0 => "nickname",
+        1 => "max power",
+        2 => "power (half hearts)",
+        3 => "gralats",
+        4 => "arrows",
+        5 => "bombs",
+        6 => "glove",
+        8 => "sword",
+        9 => "shield",
+        10 => "gani",
+        11 => "head",
+        13 => "colors",
+        15 => "x (half tiles)",
+        16 => "y (half tiles)",
+        18 => "status",
+        20 => "level",
+        27 => "kills",
+        28 => "deaths",
+        29 => "online seconds",
+        30 => "last IP",
+        32 => "AP",
+        34 => "account",
+        35 => "body",
+        36 => "rating",
+        _ => return None,
+    })
+}
+
 /// Find one player by id (digits) or by exact account name in `list`.
 /// An account that more than one entry has is refused, so a script never
 /// acts on the wrong one.
@@ -488,6 +584,50 @@ mod tests {
 
     fn set_payload(r: &Rights) -> Vec<u8> {
         rights_set(r).unwrap()[1..].to_vec()
+    }
+
+    /// The id 72 the fork sent the real RC in the 2026-11-04 capture.
+    const CAPTURED_72: &str = "2023257465737431246d61696eb020284c616232323272632123222623202020242a25252621283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5c305d323434336f6e6c696e6573746172746c6f63616c2e6e773a203b2020203c2020203d20237b3e202820209f4054422574657374314328626f64792e706e67444e927e202020202324626f6d6223626f772c2d67725f6d6f76656d656e74";
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn props_reply_matches_the_capture() {
+        // 73 + 0x20 = 'i'; player 3.
+        assert_eq!(props_get(3).unwrap(), b"i #");
+        let r = parse_props(&hex(CAPTURED_72)).unwrap();
+        assert_eq!(r.id, 3);
+        assert_eq!(r.account, "test1");
+        assert_eq!(r.world, "main");
+        assert!(r.props_complete, "{:?}", r.props);
+        let ids: Vec<u8> = r.props.iter().map(|p| p.id).collect();
+        assert_eq!(
+            ids,
+            [
+                0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 13, 15, 16, 18, 20, 26, 27, 28, 29, 30, 32, 34,
+                35, 36
+            ]
+        );
+        assert_eq!(r.props[0].raw, b"(Lab222rc");
+        // Online seconds, GINT3 475.
+        assert_eq!(r.props[19].raw, [0x20, 0x23, 0x7b]);
+        assert_eq!(r.tail_counts, (0, 0));
+        assert_eq!(
+            r.weapons.unwrap(),
+            ["bomb".to_string(), "bow".into(), "-gr_movement".into()]
+        );
+        // A non-zero tail count: the weapons are not guessed.
+        let mut odd = hex(CAPTURED_72);
+        let at = odd.len() - 27;
+        assert_eq!(&odd[at..at + 4], b"    ");
+        odd[at + 1] = 0x21;
+        assert_eq!(parse_props(&odd).unwrap().weapons, None);
+        assert!(parse_props(&hex(&CAPTURED_72[..40])).is_none());
     }
 
     #[test]
