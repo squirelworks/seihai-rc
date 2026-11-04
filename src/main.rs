@@ -10,7 +10,9 @@ use seihai_rc::nc::{
     weapon_get_message, weapon_list_message, weapon_set_message, NcEvent, NcSession,
 };
 use seihai_rc::players::{
-    admin_message, disconnect_player, private_admin_message, private_message, resolve, warp_player,
+    admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
+    parse_comments, plo as players_plo, private_admin_message, private_message, resolve,
+    warp_player,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -28,6 +30,8 @@ USAGE:
   seihai-rc players pm WHO[,WHO...] TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players admin-pm WHO TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
+  seihai-rc players comments ACCOUNT [--set TEXT | --set-file PATH] (--server ... | ...)
+  seihai-rc players ban ACCOUNT [--set on|off [--reason TEXT]] (--server ... | ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
@@ -54,6 +58,14 @@ USAGE:
   players say   Admin message to everyone online (id 63).
   players admin-pm
                 Admin message to one player or RC (id 64).
+  players comments
+                Print an account's staff comments (id 85, reply 63), one
+                line each. --set replaces them (id 86); --set-file reads
+                them from a file, one comment per line. Read back after.
+  players ban   Print whether an account is banned on this server, and
+                why (id 87, reply 64). --set on|off with --reason changes
+                it (id 88) and reads it back. The gserver-v2 fork hung
+                after a ban set on an online player in the 2026-11-04 lab.
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
@@ -102,6 +114,10 @@ OPTIONS:
                        attributes. A script with a line break is not sent.
   --script-file PATH   Read the script from a file, instead of --script.
   --image NAME         Weapon image for weapon set.
+  --set VALUE          players comments: the new comments (one line).
+                       players ban: on or off.
+  --set-file PATH      players comments: the new comments, one per line.
+  --reason TEXT        players ban --set: the reason (default empty).
   --secure-login       Ask the listserver for the RC list through the
                        secure handshake (id 5, token SEI00001). The account
                        and password go sealed. Needs --server-key.
@@ -131,6 +147,9 @@ struct Opts {
     script: Option<String>,
     script_file: Option<String>,
     image: Option<String>,
+    set: Option<String>,
+    set_file: Option<String>,
+    reason: Option<String>,
     server_key: Option<String>,
     script_flag: bool,
     secure_login: bool,
@@ -173,6 +192,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             }
             "--script-file" => o.script_file = Some(val!(&a)),
             "--image" => o.image = Some(val!(&a)),
+            "--set" => o.set = Some(val!(&a)),
+            "--set-file" => o.set_file = Some(val!(&a)),
+            "--reason" => o.reason = Some(val!(&a)),
             "--server-key" => o.server_key = Some(val!(&a)),
             "--secure-login" => o.secure_login = true,
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
@@ -518,6 +540,133 @@ fn cmd_players_admin_pm(o: &Opts, who: &str, words: &[&str]) -> Result<(), Strin
     send_and_settle(&mut s, o, &c, msg)?;
     println!("sent admin message to {} {}", e.id, e.account);
     s.close();
+    Ok(())
+}
+
+/// Read events until a message `id` arrives that `parse` reads for
+/// `account`, or the timeout passes.
+fn await_reply<T>(
+    s: &mut Session,
+    c: &Common,
+    id: u8,
+    account: &str,
+    parse: impl Fn(&[u8]) -> Option<(String, T)>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + c.timeout;
+    loop {
+        match s.next_event(deadline).map_err(|e| e.to_string())? {
+            Some(Event::Other(got, payload)) if got == id => {
+                if let Some((who, value)) = parse(&payload) {
+                    if who.eq_ignore_ascii_case(account) {
+                        return Ok(value);
+                    }
+                }
+            }
+            Some(Event::Disconnect(why)) => {
+                return Err(format!("the server closed the link: {why}"))
+            }
+            Some(_) => {}
+            None => {
+                return Err(format!(
+                    "no reply (id {id}) for {account} before the timeout"
+                ))
+            }
+        }
+    }
+}
+
+fn read_comments(s: &mut Session, c: &Common, account: &str) -> Result<Vec<String>, String> {
+    let msg = comments_get(account).map_err(|e| e.to_string())?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    await_reply(s, c, players_plo::RC_PLAYERCOMMENTSGET, account, |p| {
+        parse_comments(p).map(|r| (r.account, r.lines))
+    })
+}
+
+fn cmd_players_comments(o: &Opts, account: &str) -> Result<(), String> {
+    let new = match (&o.set, &o.set_file) {
+        (Some(_), Some(_)) => return Err("give either --set or --set-file".into()),
+        (Some(text), None) => Some(text.clone()),
+        (None, Some(path)) => {
+            Some(std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?)
+        }
+        (None, None) => None,
+    };
+    let set = match &new {
+        Some(text) => Some(
+            comments_set(account, text.trim_end_matches(['\n', '\r']))
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    if let Some(msg) = set {
+        s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    }
+    let lines = read_comments(&mut s, &c, account)?;
+    s.close();
+    for line in &lines {
+        println!("{line}");
+    }
+    if let Some(text) = new {
+        let want: Vec<&str> = text.trim_end_matches(['\n', '\r']).lines().collect();
+        if lines != want {
+            return Err(format!(
+                "sent the comments for {account}, but the server read back {} line(s), not {}",
+                lines.len(),
+                want.len()
+            ));
+        }
+        eprintln!("set the comments for {account}");
+    }
+    Ok(())
+}
+
+fn cmd_players_ban(o: &Opts, account: &str) -> Result<(), String> {
+    let want = match o.set.as_deref() {
+        None => {
+            if o.reason.is_some() {
+                return Err("--reason needs --set on or --set off".into());
+            }
+            None
+        }
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(other) => return Err(format!("--set: expected on or off, got {other}")),
+    };
+    let reason = o.reason.clone().unwrap_or_default();
+    let set = match want {
+        Some(on) => Some(ban_set(account, on, &reason).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let get = ban_get(account).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    if let Some(msg) = set {
+        s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    }
+    s.send_messages(&[get]).map_err(|e| e.to_string())?;
+    let ban = await_reply(&mut s, &c, players_plo::RC_PLAYERBANGET, account, |p| {
+        parse_ban(p).map(|b| (b.account.clone(), b))
+    })?;
+    s.close();
+    println!(
+        "{}: {}",
+        ban.account,
+        if ban.banned { "banned" } else { "not banned" }
+    );
+    for line in &ban.reason {
+        println!("reason: {line}");
+    }
+    if let Some(on) = want {
+        if ban.banned != on {
+            return Err(format!(
+                "sent the ban for {account}, but the server reads it back as {}",
+                if ban.banned { "on" } else { "off" }
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1012,6 +1161,8 @@ fn main() -> ExitCode {
         ["players", "admin-pm", who, words @ ..] if !words.is_empty() => {
             cmd_players_admin_pm(&o, who, words)
         }
+        ["players", "comments", account] => cmd_players_comments(&o, account),
+        ["players", "ban", account] => cmd_players_ban(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),

@@ -57,10 +57,17 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       GSHORT id then the text). Layout **check**. Evidence: unit test in
       `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
       No real client. The fork was not run.
-- [ ] Props (73/74/76 → 72), rights (83/84 → 62), comments (85/86 → 63),
-      local ban (87/88 → 64), list RCs (65). Blocked on a lab capture:
-      neither this repo nor Graal_analysis has a payload layout for them
-      (Graal_analysis names the ids and the 2001/08/20 forms only).
+- [x] Comments (85/86 → 63) and account ban (87/88 → 64):
+      `players comments ACCOUNT [--set ...]`, `players ban ACCOUNT [--set on|off]`.
+      PM text (28) is now tokenized, as the Seihai client sends it.
+      Evidence: a real RC (`GSERV024`) against the fork, 2026-11-04
+      (`docs/lab/2026-11-04-rc-player-admin.md`); `seihai-rc` itself is
+      checked against those bytes in `tests/fake_servers.rs`.
+- [ ] Rights (83/84 → 62): layout in the same lab note. Read the folder
+      text tokenized; the fork returns it untokenized.
+- [ ] Props (73/76 → 72): layout in the same lab note. Still to check:
+      which tail GSHORT is flags and which chests, and 76's extra byte.
+- [ ] List RCs (65). Not in the 2026-11-04 capture.
 
 ## Stage 3: accounts
 

@@ -13,7 +13,8 @@ client: [seihai](https://github.com/squirelworks/seihai).
 **Status: command line.** Log in directly or through the listserver's RC
 list, watch the RC chat, list the players online, and send a private
 message, an admin message to everyone or to one player, a disconnect or
-a warp (`players pm/say/admin-pm/kick/warp`; layouts still need a fork lab check). `nc login` opens the
+a warp (`players pm/say/admin-pm/kick/warp`; layouts still need a fork lab check),
+and read or set an account's comments and ban (`players comments/ban`). `nc login` opens the
 separate NPC-server socket (type 3, plain zlib) when you already know its
 address. NPC Control can also find the NPC-server from the game server and
 then list, get, set and delete NPCs, classes and weapons, including class
@@ -47,6 +48,8 @@ seihai-rc players list --listserver 127.0.0.1:14922 --pick "My Server" --account
 seihai-rc players pm 2,bob "Meet at the shop" --server 127.0.0.1:14802 --account myrc
 seihai-rc players say "Restart in 5 minutes" --server 127.0.0.1:14802 --account myrc
 seihai-rc players admin-pm bob "Please stop spamming" --server 127.0.0.1:14802 --account myrc
+seihai-rc players comments test1 --server 127.0.0.1:14802 --account myrc
+seihai-rc players ban test1 --set on --reason "Cheating" --server 127.0.0.1:14802 --account myrc
 seihai-rc players kick bob --server 127.0.0.1:14802 --account myrc
 seihai-rc players warp alice cave.nw 30.5 12 --server 127.0.0.1:14802 --account myrc
 

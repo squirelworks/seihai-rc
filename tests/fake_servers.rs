@@ -555,10 +555,36 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
             ],
         );
         let mut seen = Vec::new();
+        // Per-account comments and ban, kept as the bytes the RC sent.
+        let mut comments: Vec<u8> = Vec::new();
+        let mut ban: Vec<u8> = vec![gchar(0)];
+        let reply = |id: u8, account: &[u8], rest: &[u8]| {
+            let mut p = Vec::new();
+            push_gstring(&mut p, account);
+            p.extend_from_slice(rest);
+            message(id, &p)
+        };
+        let after_account = |p: &[u8]| -> (Vec<u8>, Vec<u8>) {
+            let n = usize::from(p[0] - 0x20);
+            (p[1..1 + n].to_vec(), p[1 + n..].to_vec())
+        };
         while let Some(frame) = read_raw_frame_timeout(&mut s) {
             for m in split_messages(&codec.decode(&frame).unwrap()) {
-                if answer_kick && m.id == 61 {
-                    send_msgs(&mut s, &mut codec, &[message(56, &m.payload)]);
+                match m.id {
+                    61 if answer_kick => {
+                        send_msgs(&mut s, &mut codec, &[message(56, &m.payload)]);
+                    }
+                    85 => {
+                        let r = reply(63, &m.payload, &comments);
+                        send_msgs(&mut s, &mut codec, &[r]);
+                    }
+                    86 => comments = after_account(&m.payload).1,
+                    87 => {
+                        let r = reply(64, &m.payload, &ban);
+                        send_msgs(&mut s, &mut codec, &[r]);
+                    }
+                    88 => ban = after_account(&m.payload).1,
+                    _ => {}
                 }
                 seen.push(m);
             }
@@ -601,7 +627,7 @@ fn players_pm_sends_count_ids_and_text() {
     let seen = h.join().unwrap();
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(seen[0].id, 28);
-    assert_eq!(seen[0].payload, b" \" \" #hello there");
+    assert_eq!(seen[0].payload, b" \" \" #\"hello there\"");
 }
 
 #[test]
@@ -612,7 +638,7 @@ fn players_pm_classic_login() {
     let seen = h.join().unwrap();
     assert_eq!(seen[0].id, 28);
     // count 1, id 200 = (1 << 7) | 72.
-    assert_eq!(seen[0].payload, [0x20, 0x21, 0x21, 0x20 + 72, b'h', b'i']);
+    assert_eq!(seen[0].payload, b" !!h\"hi\"");
 }
 
 #[test]
@@ -692,4 +718,81 @@ fn players_actions_refuse_who_is_not_listed() {
         );
         assert!(h.join().unwrap().is_empty(), "{args:?} sent something");
     }
+}
+
+#[test]
+fn players_comments_get_and_set() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["comments", "test1"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 85);
+    assert_eq!(seen[0].payload, b"test1");
+
+    let dir = std::env::temp_dir().join(format!("seihai-rc-comments-{}", std::process::id()));
+    std::fs::write(&dir, "lab comment one\nline two\n").unwrap();
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(
+        &addr,
+        &["comments", "test1", "--set-file", dir.to_str().unwrap()],
+    );
+    let _ = std::fs::remove_file(&dir);
+    assert!(ok, "{err}");
+    assert_eq!(out, "lab comment one\nline two\n");
+    let seen = h.join().unwrap();
+    assert_eq!(seen[0].id, 86);
+    // The bytes the real RC sent in the 2026-11-04 capture.
+    assert_eq!(seen[0].payload, b"%test1\"lab comment one\",\"line two\"");
+    assert_eq!(seen[1].id, 85);
+}
+
+#[test]
+fn players_ban_get_and_set() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(
+        &addr,
+        &["ban", "test1", "--set", "on", "--reason", "lab ban reason"],
+    );
+    assert!(ok, "{err}");
+    assert_eq!(out, "test1: banned\nreason: lab ban reason\n");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].id, 88);
+    assert_eq!(seen[0].payload, b"%test1!\"lab ban reason\"");
+    assert_eq!(seen[1].id, 87);
+    assert_eq!(seen[1].payload, b"test1");
+
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["ban", "test1"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "test1: not banned\n");
+    assert_eq!(h.join().unwrap().len(), 1);
+}
+
+#[test]
+fn players_ban_without_a_reply_fails() {
+    // A server that never answers id 87: the fork after a ban set on an
+    // online player (2026-11-04 lab) stopped sending anything.
+    let (addr, h) = fake_gserver(true);
+    let output = Command::new(env!("CARGO_BIN_EXE_seihai-rc"))
+        .args([
+            "players",
+            "ban",
+            "test1",
+            "--server",
+            &addr,
+            "--account",
+            "labrc",
+            "--timeout",
+            "1",
+        ])
+        .env("SEIHAI_RC_PASSWORD", "labpw")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("no reply (id 64)"), "{err}");
+    h.join().unwrap();
 }

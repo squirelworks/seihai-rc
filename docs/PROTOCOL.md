@@ -105,7 +105,7 @@ or account that is not in it before anything is sent.
 
 | Action | Client to server | What the command waits for |
 |---|---|---|
-| Private message | 28 `PRIVATEMESSAGE`: GSHORT count, that many GSHORT player ids, then the text as the rest of the line | nothing; it reads for `--settle` ms and fails only if the link closes |
+| Private message | 28 `PRIVATEMESSAGE`: GSHORT count, that many GSHORT player ids, then the text tokenized (one quoted item, `"` doubled), as the Seihai client sends it | nothing; it reads for `--settle` ms and fails only if the link closes |
 | Message all | 63 `RC_ADMINMESSAGE`: the text as the rest of the line | as above |
 | Admin message to one player | 64 `RC_PRIVADMINMESSAGE`: GSHORT player id, then the text as the rest of the line | as above |
 | Disconnect | 61 `RC_DISCONNECTPLAYER`: GSHORT player id, nothing after it | 56 `DELPLAYER` for that id; without it the command fails |
@@ -118,7 +118,6 @@ steps of 0.5. `warp` refuses an RC entry (level of one space).
 
 Still needs a lab check:
 
-- Whether the fork reads the PM text as plain text or wants it quoted.
 - Whether 61 needs a reason text after the id.
 - Whether 64 shows the text to that player the way 35 shows an admin
   message to everyone (`Admin <account>:`, `0xA7`, then the text, per
@@ -127,6 +126,24 @@ Still needs a lab check:
 - The widths of x and y in 82 (GCHAR half tiles here), and whether the
   level comes before them.
 - What, if anything, the fork sends the RC after 28, 63 and 82.
+
+### Comments and account ban
+
+Seen on the wire from a real RC (`GSERV024`) against the fork on
+2026-11-04: `docs/lab/2026-11-04-rc-player-admin.md`. Tokenized text is
+one item per line, each quoted with `"` doubled, joined with commas;
+`seihai-rc` reads unquoted items too.
+
+| Action | Client to server | Server to client |
+|---|---|---|
+| Comments get | 85 `RC_PLAYERCOMMENTSGET`: the account as the rest of the line | 63: GSTRING account, then the comments tokenized |
+| Comments set | 86 `RC_PLAYERCOMMENTSSET`: GSTRING account, then the comments tokenized | no reply; `players comments --set` reads them back with 85 |
+| Ban get | 87 `RC_PLAYERBANGET`: the account as the rest of the line | 64: GSTRING account, GCHAR banned (0 or 1), then the reason |
+| Ban set | 88 `RC_PLAYERBANSET`: GSTRING account, GCHAR banned, then the reason tokenized | no reply; `players ban --set` reads it back with 87 |
+
+The reason in 64 was only seen empty, and is read as tokenized text. The
+fork stopped answering after a ban set on an online player (seen once), so
+`players ban` fails with "no reply" rather than waiting forever.
 
 ## NPC Control
 
