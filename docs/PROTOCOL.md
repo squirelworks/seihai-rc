@@ -95,9 +95,9 @@ The player-list form (id 7, and a list name such as `newmain` after the
 client key) is not sent. A listserver that only treats id 7 as `SEI00001`
 will not answer this client.
 
-## Player actions (stage 2, first slice)
+## Player actions (stage 2)
 
-`seihai-rc players pm`, `say`, `kick` and `warp`. Every layout here is
+`seihai-rc players pm`, `say`, `admin-pm`, `kick` and `warp`. Every layout here is
 **check**: it is what this client sends, written from the stage-2 table in
 `docs/NEXT.md`, and no fork lab run has confirmed it yet. Each command
 logs in, waits `--settle` ms for the player list, and refuses a player id
@@ -107,6 +107,7 @@ or account that is not in it before anything is sent.
 |---|---|---|
 | Private message | 28 `PRIVATEMESSAGE`: GSHORT count, that many GSHORT player ids, then the text as the rest of the line | nothing; it reads for `--settle` ms and fails only if the link closes |
 | Message all | 63 `RC_ADMINMESSAGE`: the text as the rest of the line | as above |
+| Admin message to one player | 64 `RC_PRIVADMINMESSAGE`: GSHORT player id, then the text as the rest of the line | as above |
 | Disconnect | 61 `RC_DISCONNECTPLAYER`: GSHORT player id, nothing after it | 56 `DELPLAYER` for that id; without it the command fails |
 | Warp | 82 `RC_WARPPLAYER`: GSHORT player id, GCHAR x, GCHAR y (both in half tiles, as the level warp messages carry them), then the level name as the rest of the line | nothing; an `ADDPLAYER` resend for that id is printed as `[update]` |
 
@@ -119,6 +120,10 @@ Still needs a lab check:
 
 - Whether the fork reads the PM text as plain text or wants it quoted.
 - Whether 61 needs a reason text after the id.
+- Whether 64 shows the text to that player the way 35 shows an admin
+  message to everyone (`Admin <account>:`, `0xA7`, then the text, per
+  Graal_analysis `protocol/chat-pm-rc.md`), and whether a `0xA7` in our
+  text would be read as a line break there.
 - The widths of x and y in 82 (GCHAR half tiles here), and whether the
   level comes before them.
 - What, if anything, the fork sends the RC after 28, 63 and 82.

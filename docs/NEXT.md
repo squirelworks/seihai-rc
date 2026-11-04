@@ -43,6 +43,7 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 | List RCs | `PLI_RC_LISTRCS` (65) | (**check**) |
 
 Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
+`players admin-pm ID TEXT` (private admin message),
 `players kick ID`, `players warp ID LEVEL X Y`, `players props ID`,
 `players rights ACCOUNT [--set ...]`, `players ban ACCOUNT [--set ...]`.
 
@@ -52,8 +53,14 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       actions section of `docs/PROTOCOL.md`. Evidence: unit tests in
       `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
       No real client. The fork was not run (lab pack not available).
-- [ ] Private admin message (64), props (73/74/76 → 72), rights,
-      comments, local ban, list RCs (65).
+- [x] Private admin message: `players admin-pm WHO TEXT` (id 64,
+      GSHORT id then the text). Layout **check**. Evidence: unit test in
+      `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
+      No real client. The fork was not run.
+- [ ] Props (73/74/76 → 72), rights (83/84 → 62), comments (85/86 → 63),
+      local ban (87/88 → 64), list RCs (65). Blocked on a lab capture:
+      neither this repo nor Graal_analysis has a payload layout for them
+      (Graal_analysis names the ids and the 2001/08/20 forms only).
 
 ## Stage 3: accounts
 

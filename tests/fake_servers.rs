@@ -628,6 +628,18 @@ fn players_say_sends_the_admin_message() {
 }
 
 #[test]
+fn players_admin_pm_sends_the_id_then_text() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["admin-pm", "bob", "Please", "stop"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("sent admin message to 3 bob"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 64);
+    assert_eq!(seen[0].payload, b" #Please stop");
+}
+
+#[test]
 fn players_kick_waits_for_delplayer() {
     let (addr, h) = fake_gserver_actions(true);
     let (ok, out, err) = run_players(&addr, &["kick", "bob"]);
@@ -669,6 +681,7 @@ fn players_actions_refuse_who_is_not_listed() {
         &["warp", "staff", "cave.nw", "1", "1"][..],
         &["kick", "9"][..],
         &["pm", "2,carol", "hi"][..],
+        &["admin-pm", "carol", "hi"][..],
     ] {
         let (addr, h) = fake_gserver_actions(true);
         let (ok, _, err) = run_players(&addr, args);
