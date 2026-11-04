@@ -1,18 +1,16 @@
-//! Stage 2: player actions. Built so far: private messages, the admin
-//! message to everyone and to one player, disconnect, warp, and the
-//! comments, account ban and rights of an account, and reading a player's
-//! props. Setting props (76) is not sent yet; see `docs/PROTOCOL.md`.
+//! Stage 2: player actions. Private messages, the admin message to
+//! everyone and to one player, disconnect, warp, the comments, account ban
+//! and rights of an account, and reading and setting props.
 //!
-//! Comments (85/86 → 63), the ban (87/88 → 64), rights (83/84 → 62) and
-//! props (73 → 72) follow the 2026-11-04
-//! loopback capture of a real RC (`GSERV024`) against the gserver-v2 fork:
-//! `docs/lab/2026-11-04-rc-player-admin.md`.
+//! The layouts follow the 2026-11-04 loopback captures of a real RC
+//! (`GSERV024`) against the gserver-v2 fork, and `seihai-rc` runs against
+//! it: `docs/lab/2026-11-04-rc-player-admin.md`,
+//! `docs/lab/2026-11-04-live-fork-run.md` and
+//! `docs/lab/2026-11-04-rc-props-set.md`.
 //!
 //! Plan and message table: `docs/NEXT.md`. How to add a message:
 //! `docs/ARCHITECTURE.md`, "Where new features go". Each builder has a
-//! byte-exact unit test and a case in `tests/fake_servers.rs`. The layouts
-//! for 28, 61, 63, 64 and 82 below are what this client sends; they are marked
-//! **check** in `docs/PROTOCOL.md` until a fork lab run confirms them.
+//! byte-exact unit test and a case in `tests/fake_servers.rs`.
 
 use crate::rc::{PlayerEntry, PlayerList};
 use crate::wire::{

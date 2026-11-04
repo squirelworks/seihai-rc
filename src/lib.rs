@@ -9,6 +9,7 @@
 //! `docs/PLAN.md`; the rules are in `AGENTS.md`; the protocol as this crate
 //! speaks it is in `docs/PROTOCOL.md`.
 
+pub mod accounts;
 pub mod files;
 pub mod link;
 pub mod listserver;
