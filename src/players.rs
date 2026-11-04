@@ -1,7 +1,10 @@
 //! Stage 2: player actions. Built so far: private messages, the admin
-//! message to everyone and to one player, disconnect and warp. Props,
-//! rights, comments, the local ban and the RC list come later; our notes
-//! have no payload layout for them yet.
+//! message to everyone and to one player, disconnect, warp, and the
+//! comments and account ban of an account. Props and rights come next.
+//!
+//! Comments (85/86 → 63) and the ban (87/88 → 64) follow the 2026-11-04
+//! loopback capture of a real RC (`GSERV024`) against the gserver-v2 fork:
+//! `docs/lab/2026-11-04-rc-player-admin.md`.
 //!
 //! Plan and message table: `docs/NEXT.md`. How to add a message:
 //! `docs/ARCHITECTURE.md`, "Where new features go". Each builder has a
@@ -10,7 +13,10 @@
 //! **check** in `docs/PROTOCOL.md` until a fork lab run confirms them.
 
 use crate::rc::{PlayerEntry, PlayerList};
-use crate::wire::{gchar, latin1_bytes, message, push_gshort};
+use crate::wire::{
+    gchar, gdetokenize, gtokenize, latin1_bytes, message, push_gshort, push_gstring, read_gstring,
+    text,
+};
 
 /// Client to server ids for stage 2 (ids are wire facts).
 pub mod pli {
@@ -66,6 +72,8 @@ pub enum PlayerError {
     BadCoordinate(&'static str, f32),
     /// The level name is longer than [`LEVEL_MAX`].
     LevelTooLong,
+    /// An account name is longer than a GSTRING holds.
+    AccountTooLong,
 }
 
 impl std::fmt::Display for PlayerError {
@@ -90,6 +98,9 @@ impl std::fmt::Display for PlayerError {
             ),
             PlayerError::LevelTooLong => {
                 write!(f, "the level name is longer than {LEVEL_MAX} bytes")
+            }
+            PlayerError::AccountTooLong => {
+                write!(f, "the account name is longer than {LEVEL_MAX} bytes")
             }
         }
     }
@@ -125,7 +136,9 @@ pub fn admin_message(text: &str) -> Result<Vec<u8>, PlayerError> {
 }
 
 /// Id 28, `PLI_PRIVATEMESSAGE`: GSHORT count, that many GSHORT player ids,
-/// then the text as the rest of the line.
+/// then the text tokenized as the rest of the line. The Seihai client
+/// (`seihai-core` `send_pm`) sends the text the same way, and the gserver
+/// reads it back with its tokenizer.
 pub fn private_message(ids: &[u16], text: &str) -> Result<Vec<u8>, PlayerError> {
     if ids.is_empty() {
         return Err(PlayerError::NoPlayers);
@@ -133,7 +146,8 @@ pub fn private_message(ids: &[u16], text: &str) -> Result<Vec<u8>, PlayerError> 
     if ids.len() > usize::from(GSHORT_MAX) {
         return Err(PlayerError::TooManyPlayers(ids.len()));
     }
-    let body = line_bytes("the message", text)?;
+    line_bytes("the message", text)?;
+    let body = latin1_bytes(&gtokenize(text));
     let mut payload = Vec::with_capacity(2 + 2 * ids.len() + body.len());
     push_gshort(&mut payload, ids.len() as u16);
     for &id in ids {
@@ -191,6 +205,91 @@ pub fn warp_player(id: u16, level: &str, x: f32, y: f32) -> Result<Vec<u8>, Play
     Ok(message(pli::RC_WARPPLAYER, &payload))
 }
 
+fn account_bytes(account: &str) -> Result<Vec<u8>, PlayerError> {
+    let b = line_bytes("the account name", account)?;
+    if b.len() > LEVEL_MAX {
+        Err(PlayerError::AccountTooLong)
+    } else {
+        Ok(b)
+    }
+}
+
+/// Lines as tokenized text. Each line of `lines` is one item; `\r\n`
+/// counts as one line break.
+fn tokenized_lines(lines: &str) -> Vec<u8> {
+    latin1_bytes(&gtokenize(&lines.replace("\r\n", "\n")))
+}
+
+/// Id 85, `PLI_RC_PLAYERCOMMENTSGET`: the account as the rest of the line,
+/// no length byte (capture, 2026-11-04).
+pub fn comments_get(account: &str) -> Result<Vec<u8>, PlayerError> {
+    Ok(message(pli::RC_PLAYERCOMMENTSGET, &account_bytes(account)?))
+}
+
+/// Id 86, `PLI_RC_PLAYERCOMMENTSSET`: GSTRING account, then the comments
+/// tokenized, one item per line (capture, 2026-11-04).
+pub fn comments_set(account: &str, comments: &str) -> Result<Vec<u8>, PlayerError> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &account_bytes(account)?);
+    payload.extend_from_slice(&tokenized_lines(comments));
+    Ok(message(pli::RC_PLAYERCOMMENTSSET, &payload))
+}
+
+/// Id 87, `PLI_RC_PLAYERBANGET`: the account as the rest of the line.
+pub fn ban_get(account: &str) -> Result<Vec<u8>, PlayerError> {
+    Ok(message(pli::RC_PLAYERBANGET, &account_bytes(account)?))
+}
+
+/// Id 88, `PLI_RC_PLAYERBANSET`: GSTRING account, GCHAR banned (0 or 1),
+/// then the reason tokenized (capture, 2026-11-04).
+pub fn ban_set(account: &str, banned: bool, reason: &str) -> Result<Vec<u8>, PlayerError> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &account_bytes(account)?);
+    payload.push(gchar(u8::from(banned)));
+    payload.extend_from_slice(&tokenized_lines(reason));
+    Ok(message(pli::RC_PLAYERBANSET, &payload))
+}
+
+/// Id 63, `PLO_RC_PLAYERCOMMENTSGET`: whose comments, and the lines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comments {
+    pub account: String,
+    pub lines: Vec<String>,
+}
+
+/// Read id 63: GSTRING account, then the comments tokenized.
+pub fn parse_comments(payload: &[u8]) -> Option<Comments> {
+    let mut i = 0;
+    let account = text(&read_gstring(payload, &mut i)?);
+    Some(Comments {
+        account,
+        lines: gdetokenize(&text(&payload[i..])),
+    })
+}
+
+/// Id 64, `PLO_RC_PLAYERBANGET`: whose ban, whether it is on, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ban {
+    pub account: String,
+    pub banned: bool,
+    /// The reason, one entry per line. The capture only saw an empty
+    /// reason in this reply; it is read as tokenized text, which leaves a
+    /// plain reason without commas unchanged.
+    pub reason: Vec<String>,
+}
+
+/// Read id 64: GSTRING account, GCHAR banned, then the reason.
+pub fn parse_ban(payload: &[u8]) -> Option<Ban> {
+    let mut i = 0;
+    let account = text(&read_gstring(payload, &mut i)?);
+    let banned = payload.get(i)?.wrapping_sub(0x20) != 0;
+    Some(Ban {
+        account,
+        banned,
+        reason: gdetokenize(&text(&payload[i + 1..])),
+    })
+}
+
 /// Find one player by id (digits) or by exact account name in `list`.
 /// An account that more than one entry has is refused, so a script never
 /// acts on the wrong one.
@@ -228,6 +327,55 @@ mod tests {
     }
 
     #[test]
+    fn comments_match_the_capture() {
+        // 85 + 0x20 = 'u'; 86 + 0x20 = 'v'.
+        assert_eq!(comments_get("test1").unwrap(), b"utest1");
+        assert_eq!(
+            comments_set("test1", "lab comment one\nline two").unwrap(),
+            b"v%test1\"lab comment one\",\"line two\""
+        );
+        assert_eq!(
+            parse_comments(b"%test1\"lab comment one\",\"line two\"").unwrap(),
+            Comments {
+                account: "test1".into(),
+                lines: vec!["lab comment one".into(), "line two".into()],
+            }
+        );
+        assert!(parse_comments(b"%test1").unwrap().lines.is_empty());
+        assert_eq!(
+            comments_get("a\nb"),
+            Err(PlayerError::LineBreak("the account name"))
+        );
+        assert_eq!(
+            comments_get(&"a".repeat(LEVEL_MAX + 1)),
+            Err(PlayerError::AccountTooLong)
+        );
+    }
+
+    #[test]
+    fn ban_matches_the_capture() {
+        // 87 + 0x20 = 'w'; 88 + 0x20 = 'x'.
+        assert_eq!(ban_get("test1").unwrap(), b"wtest1");
+        assert_eq!(
+            ban_set("test1", true, "lab ban reason").unwrap(),
+            b"x%test1!\"lab ban reason\""
+        );
+        assert_eq!(ban_set("test1", false, "").unwrap(), b"x%test1 ");
+        assert_eq!(
+            parse_ban(b"%test1 ").unwrap(),
+            Ban {
+                account: "test1".into(),
+                banned: false,
+                reason: vec![],
+            }
+        );
+        let on = parse_ban(b"%test1!\"lab ban reason\"").unwrap();
+        assert!(on.banned);
+        assert_eq!(on.reason, ["lab ban reason"]);
+        assert!(parse_ban(b"%test1").is_none());
+    }
+
+    #[test]
     fn resolve_by_id_or_unique_account() {
         let mut list = PlayerList::default();
         for e in [entry(2, "alice"), entry(3, "bob"), entry(4, "bob")] {
@@ -257,7 +405,7 @@ mod tests {
         // 28 + 0x20 = '<'; count 2; ids 3 and 130 ((1 << 7) | 2).
         assert_eq!(
             private_message(&[3, 130], "hi").unwrap(),
-            b"< \" #!\"hi".to_vec()
+            b"< \" #!\"\"hi\"".to_vec()
         );
         assert_eq!(private_message(&[], "hi"), Err(PlayerError::NoPlayers));
         assert_eq!(
@@ -273,7 +421,9 @@ mod tests {
     #[test]
     fn private_message_text_is_latin1() {
         let m = private_message(&[1], "caf\u{e9} \u{263a}").unwrap();
-        assert_eq!(&m[5..], b"caf\xe9 ?");
+        assert_eq!(&m[5..], b"\"caf\xe9 ?\"");
+        let quoted = private_message(&[1], "say \"hi\"").unwrap();
+        assert_eq!(&quoted[5..], b"\"say \"\"hi\"\"\"");
     }
 
     #[test]

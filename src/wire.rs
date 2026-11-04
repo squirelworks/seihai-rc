@@ -58,9 +58,80 @@ pub fn latin1_bytes(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Graal's tokenized text, as the gserver and the RC write it: one item
+/// per line, joined with commas. The encoder is `seihai-core`'s
+/// `gtokenize` (every item quoted, `"` doubled); see [`gtokenize`].
+pub fn gtokenize(lines: &str) -> String {
+    seihai_core::net::gtokenize(lines)
+}
+
+/// Read tokenized text back into lines. A quoted item runs to its closing
+/// quote (`""` inside is one `"`); an unquoted item runs to the next comma.
+/// Spaces around an item are dropped. Empty text gives no lines.
+pub fn gdetokenize(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    loop {
+        while chars.peek() == Some(&' ') {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+        let mut item = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        item.push('"');
+                    } else {
+                        break;
+                    }
+                } else {
+                    item.push(c);
+                }
+            }
+            // Anything between the closing quote and the comma is dropped.
+            for c in chars.by_ref() {
+                if c == ',' {
+                    break;
+                }
+            }
+        } else {
+            for c in chars.by_ref() {
+                if c == ',' {
+                    break;
+                }
+                item.push(c);
+            }
+            item = item.trim_end().to_string();
+        }
+        out.push(item);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokenized_text_round_trips() {
+        // The comments the real RC sent in the 2026-11-04 capture.
+        let wire = "\"lab comment one\",\"line two\"";
+        assert_eq!(gtokenize("lab comment one\nline two"), wire);
+        assert_eq!(gdetokenize(wire), ["lab comment one", "line two"]);
+        assert_eq!(
+            gdetokenize(&gtokenize("say \"hi\", ok")),
+            ["say \"hi\", ok"]
+        );
+        // Unquoted items, as the fork returns folder rights.
+        assert_eq!(gdetokenize("rw levels/*"), ["rw levels/*"]);
+        assert_eq!(gdetokenize("a,b ,\"\""), ["a", "b", ""]);
+        assert!(gdetokenize("").is_empty());
+    }
 
     #[test]
     fn gstring_round_trip() {
