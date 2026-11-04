@@ -127,7 +127,7 @@ Still needs a lab check:
   level comes before them.
 - What, if anything, the fork sends the RC after 28, 63 and 82.
 
-### Comments and account ban
+### Comments, account ban and rights
 
 Seen on the wire from a real RC (`GSERV024`) against the fork on
 2026-11-04: `docs/lab/2026-11-04-rc-player-admin.md`. Tokenized text is
@@ -140,6 +140,15 @@ one item per line, each quoted with `"` doubled, joined with commas;
 | Comments set | 86 `RC_PLAYERCOMMENTSSET`: GSTRING account, then the comments tokenized | no reply; `players comments --set` reads them back with 85 |
 | Ban get | 87 `RC_PLAYERBANGET`: the account as the rest of the line | 64: GSTRING account, GCHAR banned (0 or 1), then the reason |
 | Ban set | 88 `RC_PLAYERBANSET`: GSTRING account, GCHAR banned, then the reason tokenized | no reply; `players ban --set` reads it back with 87 |
+| Rights get | 83 `RC_PLAYERRIGHTSGET`: the account as the rest of the line | 62: GSTRING account, GINT5 rights, GSTRING IP range, GSHORT length, then that many bytes of folder rights tokenized |
+| Rights set | 84 `RC_PLAYERRIGHTSSET`: same as 62 | no reply; `players rights --set` reads them back with 83 |
+
+GINT5 is five GCHARs, high 7 bits first. Rights bits follow the RC
+dialog's checkbox order from bit 0; the capture confirms bit 0
+(warp-to-xy) and bit 9 (admin message). The fork returns the folder
+rights untokenized (`rw levels/*`), and the real RC splits that at the
+space. `seihai-rc` reads an unquoted item up to the next comma, so it
+keeps the line whole, and it always sends the lines tokenized.
 
 The reason in 64 was only seen empty, and is read as tokenized text. The
 fork stopped answering after a ban set on an online player (seen once), so

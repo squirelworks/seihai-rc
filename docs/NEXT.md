@@ -63,8 +63,11 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       Evidence: a real RC (`GSERV024`) against the fork, 2026-11-04
       (`docs/lab/2026-11-04-rc-player-admin.md`); `seihai-rc` itself is
       checked against those bytes in `tests/fake_servers.rs`.
-- [ ] Rights (83/84 → 62): layout in the same lab note. Read the folder
-      text tokenized; the fork returns it untokenized.
+- [x] Rights (83/84 → 62): `players rights ACCOUNT [--set N]
+      [--ip-range R] [--set-file PATH]`. The folder text is read as
+      tokenized lines, so the fork's untokenized `rw levels/*` stays one
+      line. Evidence: the same lab note; `tests/fake_servers.rs` checks the
+      84 bytes against the capture.
 - [ ] Props (73/76 → 72): layout in the same lab note. Still to check:
       which tail GSHORT is flags and which chests, and 76's extra byte.
 - [ ] List RCs (65). Not in the 2026-11-04 capture.

@@ -22,6 +22,27 @@ pub fn push_gint3(out: &mut Vec<u8>, n: u32) {
     out.push(gchar((n & 0x7F) as u8));
 }
 
+/// Append a GINT5: five GCHARs, high 7 bits first. Thirty-five bits; a
+/// `u32` always fits.
+pub fn push_gint5(out: &mut Vec<u8>, n: u32) {
+    let n = u64::from(n);
+    for shift in [28, 21, 14, 7, 0] {
+        out.push(gchar(((n >> shift) & 0x7F) as u8));
+    }
+}
+
+/// Read a GINT5 at `*i`, moving `*i` past it. A value over 32 bits is
+/// refused.
+pub fn read_gint5(data: &[u8], i: &mut usize) -> Option<u32> {
+    let bytes = data.get(*i..*i + 5)?;
+    let mut n: u64 = 0;
+    for &b in bytes {
+        n = (n << 7) | u64::from(b.wrapping_sub(0x20) & 0x7F);
+    }
+    *i += 5;
+    u32::try_from(n).ok()
+}
+
 /// Append a GSTRING: GCHAR length, then the bytes. Text longer than 223
 /// bytes is cut, as a GCHAR cannot say more.
 pub fn push_gstring(out: &mut Vec<u8>, s: &[u8]) {
@@ -116,6 +137,22 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gint5_matches_the_capture() {
+        // Rights 513 in the 2026-11-04 capture: `   $!`.
+        let mut b = Vec::new();
+        push_gint5(&mut b, 513);
+        assert_eq!(b, b"   $!");
+        let mut i = 0;
+        assert_eq!(read_gint5(&b, &mut i), Some(513));
+        assert_eq!(i, 5);
+        let mut big = Vec::new();
+        push_gint5(&mut big, u32::MAX);
+        let mut i = 0;
+        assert_eq!(read_gint5(&big, &mut i), Some(u32::MAX));
+        assert_eq!(read_gint5(b"    ", &mut 0), None);
+    }
 
     #[test]
     fn tokenized_text_round_trips() {

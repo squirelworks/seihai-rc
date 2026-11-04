@@ -558,6 +558,9 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
         // Per-account comments and ban, kept as the bytes the RC sent.
         let mut comments: Vec<u8> = Vec::new();
         let mut ban: Vec<u8> = vec![gchar(0)];
+        // Rights 0, IP range 0.0.0.0, folders as the fork returns them:
+        // untokenized.
+        let mut rights: Vec<u8> = b"     '0.0.0.0 +rw levels/*".to_vec();
         let reply = |id: u8, account: &[u8], rest: &[u8]| {
             let mut p = Vec::new();
             push_gstring(&mut p, account);
@@ -584,6 +587,11 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
                         send_msgs(&mut s, &mut codec, &[r]);
                     }
                     88 => ban = after_account(&m.payload).1,
+                    83 => {
+                        let r = reply(62, &m.payload, &rights);
+                        send_msgs(&mut s, &mut codec, &[r]);
+                    }
+                    84 => rights = after_account(&m.payload).1,
                     _ => {}
                 }
                 seen.push(m);
@@ -795,4 +803,34 @@ fn players_ban_without_a_reply_fails() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(err.contains("no reply (id 64)"), "{err}");
     h.join().unwrap();
+}
+
+#[test]
+fn players_rights_reads_the_forks_untokenized_folders_as_one_line() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["rights", "test1"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "account: test1\nrights: 0 (bits: none)\nip range: 0.0.0.0\nfolder: rw levels/*\n"
+    );
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].id, 83);
+    assert_eq!(seen[0].payload, b"test1");
+}
+
+#[test]
+fn players_rights_set_keeps_the_other_fields() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["rights", "test1", "--set", "513"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("rights: 513 (bits: 0, 9)"), "{out}");
+    assert!(out.contains("folder: rw levels/*"), "{out}");
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [83, 84, 83]);
+    // The bytes the real RC sent in the 2026-11-04 capture: the folder
+    // line goes back tokenized even though the fork sent it bare.
+    assert_eq!(seen[1].payload, b"%test1   $!'0.0.0.0 -\"rw levels/*\"");
 }
