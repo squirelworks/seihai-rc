@@ -33,9 +33,9 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 |---|---|---|
 | Private message | `PLI_PRIVATEMESSAGE` (28): GSHORT count, GSHORT ids, text | `PLO_PRIVATEMESSAGE` (37) |
 | Message all (admin message) | `PLI_RC_ADMINMESSAGE` (63): text | `PLO_RC_ADMINMESSAGE` (35) |
-| Private admin message | `PLI_RC_PRIVADMINMESSAGE` (64): GSHORT id, text (**check**) | |
-| Disconnect player | `PLI_RC_DISCONNECTPLAYER` (61): GSHORT id (**check**) | |
-| Warp player | `PLI_RC_WARPPLAYER` (82): GSHORT id, x, y, level (**check**) | |
+| Private admin message | `PLI_RC_PRIVADMINMESSAGE` (64): GSHORT id, text | |
+| Disconnect player | `PLI_RC_DISCONNECTPLAYER` (61): GSHORT id | |
+| Warp player | `PLI_RC_WARPPLAYER` (82): GSHORT id, GCHAR x, GCHAR y, level | |
 | Player props | `PLI_RC_PLAYERPROPSGET2` (73, by id) / `GET3` (74, by account); `PLI_RC_PLAYERPROPSSET2` (76) | `PLO_RC_PLAYERPROPSGET` (72) |
 | Rights | `PLI_RC_PLAYERRIGHTSGET` (83) / `SET` (84) | `PLO_RC_PLAYERRIGHTSGET` (62) |
 | Comments | `PLI_RC_PLAYERCOMMENTSGET` (85) / `SET` (86) | `PLO_RC_PLAYERCOMMENTSGET` (63) |
@@ -51,18 +51,19 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       `players warp` (ids 28, 63, 61, 82). Who may be an id or an account
       from the player list. Every layout is **check**; see the player
       actions section of `docs/PROTOCOL.md`. Evidence: unit tests in
-      `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
-      No real client. The fork was not run (lab pack not available).
+      `src/players.rs` and the fake gserver in `tests/fake_servers.rs`;
+      `seihai-rc` live against the fork (`1d7843a`), 2026-11-04
+      (`docs/lab/2026-11-04-live-fork-run.md`).
 - [x] Private admin message: `players admin-pm WHO TEXT` (id 64,
-      GSHORT id then the text). Layout **check**. Evidence: unit test in
-      `src/players.rs` and the fake gserver in `tests/fake_servers.rs`.
-      No real client. The fork was not run.
+      GSHORT id then the text). Evidence: unit test in `src/players.rs`,
+      the fake gserver in `tests/fake_servers.rs`, and the same live run.
 - [x] Comments (85/86 → 63) and account ban (87/88 → 64):
       `players comments ACCOUNT [--set ...]`, `players ban ACCOUNT [--set on|off]`.
       PM text (28) is now tokenized, as the Seihai client sends it.
       Evidence: a real RC (`GSERV024`) against the fork, 2026-11-04
       (`docs/lab/2026-11-04-rc-player-admin.md`); `seihai-rc` itself is
-      checked against those bytes in `tests/fake_servers.rs`.
+      checked against those bytes in `tests/fake_servers.rs`, and ran
+      live against the fork (`docs/lab/2026-11-04-live-fork-run.md`).
 - [x] Rights (83/84 → 62): `players rights ACCOUNT [--set N]
       [--ip-range R] [--set-file PATH]`. The folder text is read as
       tokenized lines, so the fork's untokenized `rw levels/*` stays one

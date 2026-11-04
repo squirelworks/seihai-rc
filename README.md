@@ -13,7 +13,7 @@ client: [seihai](https://github.com/squirelworks/seihai).
 **Status: command line.** Log in directly or through the listserver's RC
 list, watch the RC chat, list the players online, and send a private
 message, an admin message to everyone or to one player, a disconnect or
-a warp (`players pm/say/admin-pm/kick/warp`; layouts still need a fork lab check),
+a warp (`players pm/say/admin-pm/kick/warp`),
 and read or set an account's comments, ban and rights (`players comments/ban/rights`), and read a player's props (`players props`). `nc login` opens the
 separate NPC-server socket (type 3, plain zlib) when you already know its
 address. NPC Control can also find the NPC-server from the game server and
