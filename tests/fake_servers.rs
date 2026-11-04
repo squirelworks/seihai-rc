@@ -526,3 +526,157 @@ fn rc_list_refused() {
     }
     h.join().unwrap();
 }
+
+// Stage 2 player actions, through the `players` commands. The fake sends
+// the list, then records every message the RC sends. With `answer_kick`
+// it answers id 61 with DELPLAYER (56) for that id, the way a server that
+// drops the player would tell its RCs.
+
+fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Message>>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    let h = thread::spawn(move || {
+        let (mut s, _) = l.accept().unwrap();
+        s.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let login = zlib_decompress(&read_raw_frame(&mut s)).unwrap();
+        let mut codec = match login[0] - 0x20 {
+            6 => Codec::gen5(login[1] - 0x20),
+            1 => Codec::Plain,
+            t => panic!("unexpected login type {t}"),
+        };
+        send_msgs(
+            &mut s,
+            &mut codec,
+            &[
+                message(25, &[gchar(73)]),
+                addplayer(2, "alice", "start.nw", "Alice"),
+                addplayer(3, "bob", "cave.nw", "Bob"),
+                addplayer(200, "staff", " ", "*staff"),
+            ],
+        );
+        let mut seen = Vec::new();
+        while let Some(frame) = read_raw_frame_timeout(&mut s) {
+            for m in split_messages(&codec.decode(&frame).unwrap()) {
+                if answer_kick && m.id == 61 {
+                    send_msgs(&mut s, &mut codec, &[message(56, &m.payload)]);
+                }
+                seen.push(m);
+            }
+        }
+        seen
+    });
+    (addr, h)
+}
+
+fn run_players(addr: &str, extra: &[&str]) -> (bool, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_seihai-rc"))
+        .arg("players")
+        .args(extra)
+        .args([
+            "--server",
+            addr,
+            "--account",
+            "labrc",
+            "--settle",
+            "200",
+            "--timeout",
+            "5",
+        ])
+        .env("SEIHAI_RC_PASSWORD", "labpw")
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn players_pm_sends_count_ids_and_text() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["pm", "2,bob", "hello", "there"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("sent private message to 2,3"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 28);
+    assert_eq!(seen[0].payload, b" \" \" #hello there");
+}
+
+#[test]
+fn players_pm_classic_login() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, _, err) = run_players(&addr, &["pm", "staff", "hi", "--rc", "classic"]);
+    assert!(ok, "{err}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen[0].id, 28);
+    // count 1, id 200 = (1 << 7) | 72.
+    assert_eq!(seen[0].payload, [0x20, 0x21, 0x21, 0x20 + 72, b'h', b'i']);
+}
+
+#[test]
+fn players_say_sends_the_admin_message() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["say", "Restart", "in", "5"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("sent admin message"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 63);
+    assert_eq!(seen[0].payload, b"Restart in 5");
+}
+
+#[test]
+fn players_kick_waits_for_delplayer() {
+    let (addr, h) = fake_gserver_actions(true);
+    let (ok, out, err) = run_players(&addr, &["kick", "bob"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("disconnected 3 bob"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 61);
+    assert_eq!(seen[0].payload, [0x20, 0x23]);
+}
+
+#[test]
+fn players_kick_fails_when_the_player_stays() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, _, err) = run_players(&addr, &["kick", "3"]);
+    assert!(!ok);
+    assert!(err.contains("no DELPLAYER"), "{err}");
+    assert_eq!(h.join().unwrap()[0].id, 61);
+}
+
+#[test]
+fn players_warp_sends_id_half_tiles_and_level() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["warp", "alice", "cave.nw", "30.5", "12"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("sent warp for 2 alice"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].id, 82);
+    let mut want = vec![0x20, 0x22, 0x20 + 61, 0x20 + 24];
+    want.extend_from_slice(b"cave.nw");
+    assert_eq!(seen[0].payload, want);
+}
+
+#[test]
+fn players_actions_refuse_who_is_not_listed() {
+    for args in [
+        &["warp", "carol", "cave.nw", "1", "1"][..],
+        &["warp", "staff", "cave.nw", "1", "1"][..],
+        &["kick", "9"][..],
+        &["pm", "2,carol", "hi"][..],
+    ] {
+        let (addr, h) = fake_gserver_actions(true);
+        let (ok, _, err) = run_players(&addr, args);
+        assert!(!ok, "{args:?} should fail");
+        assert!(
+            err.contains("no player or RC") || err.contains("is an RC"),
+            "{args:?}: {err}"
+        );
+        assert!(h.join().unwrap().is_empty(), "{args:?} sent something");
+    }
+}

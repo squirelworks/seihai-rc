@@ -1,7 +1,8 @@
 //! seihai-rc: a Graal Remote Control (RC) client for server staff.
 //!
 //! Stage 1 logs in (directly, or through the listserver's RC list) and reads
-//! the player list. NPC Control logs in on its own socket, finds that socket
+//! the player list. [`players`] builds the stage-2 player actions (PM, admin
+//! message, disconnect, warp). NPC Control logs in on its own socket, finds that socket
 //! from the game server, and lists NPCs, classes and weapons. [`files`] is
 //! the file link a live level editor calls (list a directory, fetch a file,
 //! send a file). The plan is in
