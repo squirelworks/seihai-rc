@@ -370,9 +370,20 @@ pub fn props_get(id: u16) -> Result<Vec<u8>, PlayerError> {
     Ok(message(pli::RC_PLAYERPROPSGET2, &payload))
 }
 
-/// Id 72, `PLO_RC_PLAYERPROPSGET`, as far as the capture shows it.
+/// Id 74, `PLI_RC_PLAYERPROPSGET3`: GSTRING account, then an empty
+/// GSTRING (capture 2, 2026-11-04: the real RC sent `%test1` and one 0x20
+/// for an offline account). The reply is the same 72, with player id 0.
+pub fn props_get_account(account: &str) -> Result<Vec<u8>, PlayerError> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &account_bytes(account)?);
+    push_gstring(&mut payload, b"");
+    Ok(message(pli::RC_PLAYERPROPSGET3, &payload))
+}
+
+/// Id 72, `PLO_RC_PLAYERPROPSGET`, as far as the captures show it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropsReply {
+    /// The player id; 0 for an account asked for by name (74).
     pub id: u16,
     pub account: String,
     pub world: String,
@@ -381,17 +392,21 @@ pub struct PropsReply {
     pub props: Vec<seihai_core::protocol::PlayerProp>,
     /// True when the props block decoded to its last byte.
     pub props_complete: bool,
-    /// The two GSHORTs after the props. Both were 0 in the capture, so
-    /// which one counts flags and which opened chests is not known.
-    pub tail_counts: (u16, u16),
-    /// The weapon names. `None` when a tail count is not 0: the entries
-    /// after a count have not been seen, so the weapons cannot be found.
+    /// The NPC script flags: a GSHORT count, then a GSTRING each (seen in
+    /// the real RC's 76). The gserver-v2 fork sends a count of 0 even for
+    /// an account with flags stored.
+    pub flags: Vec<String>,
+    /// The opened-chest count, the GSHORT after the flags. Only 0 has
+    /// been seen; what follows a non-zero count is not known.
+    pub chests: u16,
+    /// The weapon names. `None` when the chest count is not 0, as the
+    /// weapons cannot then be found.
     pub weapons: Option<Vec<String>>,
 }
 
 /// Read id 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR
-/// props length N, N bytes of props, GSHORT, GSHORT, GCHAR weapon count,
-/// then a GSTRING per weapon.
+/// props length N, N bytes of props, GSHORT flag count and a GSTRING per
+/// flag, GSHORT chest count, GCHAR weapon count, then a GSTRING per weapon.
 pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
     use seihai_core::protocol::{parse_player_props, read_gshort};
     let id = read_gshort(payload)?;
@@ -401,10 +416,15 @@ pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
     let block = read_gstring(payload, &mut i)?;
     let props = parse_player_props(&block);
     let used: usize = props.iter().map(|p| 1 + p.raw.len()).sum();
-    let first = read_gshort(payload.get(i..)?)?;
-    let second = read_gshort(payload.get(i + 2..)?)?;
-    i += 4;
-    let weapons = if first == 0 && second == 0 {
+    let nflags = read_gshort(payload.get(i..)?)?;
+    i += 2;
+    let mut flags = Vec::with_capacity(usize::from(nflags));
+    for _ in 0..nflags {
+        flags.push(text(&read_gstring(payload, &mut i)?));
+    }
+    let chests = read_gshort(payload.get(i..)?)?;
+    i += 2;
+    let weapons = if chests == 0 {
         let n = payload.get(i)?.wrapping_sub(0x20);
         i += 1;
         let mut names = Vec::with_capacity(usize::from(n));
@@ -421,9 +441,152 @@ pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
         world,
         props_complete: used == block.len(),
         props,
-        tail_counts: (first, second),
+        flags,
+        chests,
         weapons,
     })
+}
+
+/// The prop ids the real RC sends in 76, in its order (both 2026-11-04
+/// captures). It leaves out 0 (nickname), 30 (last IP), 34 (account) and
+/// 36 (rating), which 72 carries.
+pub const SET_PROP_IDS: [u8; 25] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 18, 20, 21, 22, 23, 26, 27, 28, 29, 32, 35,
+];
+
+/// What a props set may change, by name. Each is one GCHAR except
+/// gralats (GINT3).
+pub const PROP_EDIT_NAMES: [(&str, u8); 7] = [
+    ("max-hearts", 1),
+    ("hearts", 2),
+    ("gralats", 3),
+    ("arrows", 4),
+    ("bombs", 5),
+    ("glove", 6),
+    ("ap", 32),
+];
+
+/// The largest value a GINT3 holds.
+const GINT3_MAX: u32 = (1 << 21) - 1;
+
+/// One change for [`props_set`], from `NAME=VALUE`. Hearts take halves
+/// (`2.5`); every other value is a whole number.
+pub fn parse_prop_edit(item: &str) -> Result<(u8, Vec<u8>), String> {
+    let (name, value) = item
+        .split_once('=')
+        .ok_or_else(|| format!("{item}: give NAME=VALUE"))?;
+    let name = name.trim();
+    let value = value.trim();
+    let id = PROP_EDIT_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, id)| *id)
+        .ok_or_else(|| {
+            let names: Vec<&str> = PROP_EDIT_NAMES.iter().map(|(n, _)| *n).collect();
+            format!("{name}: not a prop this client sets ({})", names.join(", "))
+        })?;
+    let bad = || format!("{name}={value}: not a value this prop holds");
+    let raw = match id {
+        1 | 2 => {
+            let v: f32 = value.parse().map_err(|_| bad())?;
+            let halves = v * 2.0;
+            if !halves.is_finite() || halves.fract() != 0.0 || !(0.0..=40.0).contains(&halves) {
+                return Err(bad());
+            }
+            if id == 1 && halves.rem_euclid(2.0) != 0.0 {
+                return Err(bad());
+            }
+            // Max power is whole hearts; power is half hearts.
+            let n = if id == 1 { halves / 2.0 } else { halves };
+            vec![gchar(n as u8)]
+        }
+        3 => {
+            let v: u32 = value.parse().map_err(|_| bad())?;
+            if v > GINT3_MAX {
+                return Err(bad());
+            }
+            let mut b = Vec::with_capacity(3);
+            push_gint3(&mut b, v);
+            b
+        }
+        _ => {
+            let v: u8 = value.parse().map_err(|_| bad())?;
+            if v > GCHAR_MAX {
+                return Err(bad());
+            }
+            vec![gchar(v)]
+        }
+    };
+    Ok((id, raw))
+}
+
+fn push_gint3(out: &mut Vec<u8>, v: u32) {
+    out.push(gchar(((v >> 14) & 0x7f) as u8));
+    out.push(gchar(((v >> 7) & 0x7f) as u8));
+    out.push(gchar((v & 0x7f) as u8));
+}
+
+/// Id 76, `PLI_RC_PLAYERPROPSSET2`, built from a 72 the way the real RC
+/// builds it (both 2026-11-04 captures): GSTRING account, GSTRING world,
+/// GCHAR props length and the props in [`SET_PROP_IDS`] order, GSHORT
+/// flag count and a GSTRING each, GSHORT chest count (0), GCHAR weapon
+/// count and a GSTRING each, then a GCHAR 0.
+///
+/// Each prop comes from `from`, then `edits` replace theirs. Online
+/// seconds (29) go as 0, as the real RC sends them; the fork ignores them.
+/// Props 7, 21, 22 and 23, which the fork's 72 leaves out, go as the RC
+/// sent them (7 as 1, the rest empty). A 72 with chests, with unread
+/// weapons or without one of the other props is refused.
+pub fn props_set(from: &PropsReply, edits: &[(u8, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    if from.chests != 0 {
+        return Err("the props carry opened chests; that layout is not known".into());
+    }
+    let weapons = from
+        .weapons
+        .as_ref()
+        .ok_or("the weapons in the props were not read")?;
+    let mut block = Vec::new();
+    for id in SET_PROP_IDS {
+        let raw = match edits.iter().rev().find(|(e, _)| *e == id) {
+            Some((_, raw)) => raw.clone(),
+            None => match id {
+                29 => vec![0x20; 3],
+                7 | 21..=23 => from
+                    .props
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.raw.clone())
+                    .unwrap_or_else(|| vec![if id == 7 { 0x21 } else { 0x20 }]),
+                _ => from
+                    .props
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.raw.clone())
+                    .ok_or_else(|| format!("the props have no prop {id} to send back"))?,
+            },
+        };
+        block.push(gchar(id));
+        block.extend_from_slice(&raw);
+    }
+    if block.len() > usize::from(GCHAR_MAX) {
+        return Err("the props are longer than one GCHAR length holds".into());
+    }
+    let account = account_bytes(&from.account).map_err(|e| e.to_string())?;
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &account);
+    push_gstring(&mut payload, &latin1_bytes(&from.world));
+    push_gstring(&mut payload, &block);
+    push_gshort(&mut payload, from.flags.len() as u16);
+    for f in &from.flags {
+        push_gstring(&mut payload, &latin1_bytes(f));
+    }
+    push_gshort(&mut payload, 0);
+    payload.push(gchar(weapons.len() as u8));
+    for w in weapons {
+        push_gstring(&mut payload, &latin1_bytes(w));
+    }
+    payload.push(gchar(0));
+    Ok(message(pli::RC_PLAYERPROPSSET2, &payload))
 }
 
 /// A short name for the player prop ids seen in the 2026-11-04 capture.
@@ -436,6 +599,7 @@ pub fn prop_name(id: u8) -> Option<&'static str> {
         4 => "arrows",
         5 => "bombs",
         6 => "glove",
+        7 => "bomb power",
         8 => "sword",
         9 => "shield",
         10 => "gani",
@@ -445,6 +609,10 @@ pub fn prop_name(id: u8) -> Option<&'static str> {
         16 => "y (half tiles)",
         18 => "status",
         20 => "level",
+        21 => "horse image",
+        22 => "horse bushes",
+        23 => "effect colors",
+        26 => "magic points",
         27 => "kills",
         28 => "deaths",
         29 => "online seconds",
@@ -616,18 +784,101 @@ mod tests {
         assert_eq!(r.props[0].raw, b"(Lab222rc");
         // Online seconds, GINT3 475.
         assert_eq!(r.props[19].raw, [0x20, 0x23, 0x7b]);
-        assert_eq!(r.tail_counts, (0, 0));
+        assert!(r.flags.is_empty());
+        assert_eq!(r.chests, 0);
         assert_eq!(
             r.weapons.unwrap(),
             ["bomb".to_string(), "bow".into(), "-gr_movement".into()]
         );
-        // A non-zero tail count: the weapons are not guessed.
+        // A chest count that is not 0: the weapons are not guessed.
         let mut odd = hex(CAPTURED_72);
         let at = odd.len() - 27;
         assert_eq!(&odd[at..at + 4], b"    ");
-        odd[at + 1] = 0x21;
+        odd[at + 3] = 0x21;
         assert_eq!(parse_props(&odd).unwrap().weapons, None);
         assert!(parse_props(&hex(&CAPTURED_72[..40])).is_none());
+    }
+
+    /// Capture 2, 2026-11-04: the fork's 72 for offline `test1` (asked
+    /// for with 74) after the set below, and the real RC's 76 that set
+    /// gralats 3 and the flag `labflag=1` from the same dialog.
+    const CAPTURED2_72: &str = "2020257465737431246d61696eaf2027756e6b6e6f776e2123222623202023242a25252621283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5d3038323434336f6e6c696e6573746172746c6f63616c2e6e773a203b2020203c2020203d20203e3e20202020204052422574657374314328626f64792e706e67444e927e202020202324626f6d6223626f772c2d67725f6d6f76656d656e74";
+    const CAPTURED2_76: &str = "257465737431246d61696e9d2123222623202023242a252526212721283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5d3038323434336f6e6c696e6573746172746c6f63616c2e6e773520362037203a203b2020203c2020203d20202040524328626f64792e706e672021296c6162666c61673d3120202324626f6d6223626f772c2d67725f6d6f76656d656e7420";
+
+    #[test]
+    fn props_by_account_matches_capture_2() {
+        // 74 + 0x20 = 'j'.
+        assert_eq!(props_get_account("test1").unwrap(), b"j%test1 ");
+        let r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        assert_eq!(r.id, 0);
+        assert_eq!(r.account, "test1");
+        assert!(r.props_complete);
+        assert!(r.flags.is_empty());
+        assert_eq!(r.weapons.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn props_set_rebuilds_the_real_rcs_76() {
+        let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        r.flags = vec!["labflag=1".into()];
+        let msg = props_set(&r, &[]).unwrap();
+        assert_eq!(msg[0], b'l'); // 76 + 0x20
+        assert_eq!(msg[1..], hex(CAPTURED2_76));
+        // The same tail in a 72 reads back as one flag.
+        let mut reply = vec![0x20, 0x20];
+        reply.extend_from_slice(&msg[1..msg.len() - 1]);
+        let back = parse_props(&reply).unwrap();
+        assert_eq!(back.flags, ["labflag=1"]);
+        assert_eq!(back.weapons.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn props_set_applies_edits() {
+        let r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        let edits = [
+            parse_prop_edit("gralats=200").unwrap(),
+            parse_prop_edit("hearts=2.5").unwrap(),
+            parse_prop_edit("max-hearts=4").unwrap(),
+            parse_prop_edit("ap=60").unwrap(),
+        ];
+        let msg = props_set(&r, &edits).unwrap();
+        let mut i = 1;
+        read_gstring(&msg, &mut i).unwrap();
+        read_gstring(&msg, &mut i).unwrap();
+        let block = read_gstring(&msg, &mut i).unwrap();
+        let props = seihai_core::protocol::parse_player_props(&block);
+        let ids: Vec<u8> = props.iter().map(|p| p.id).collect();
+        assert_eq!(ids, SET_PROP_IDS);
+        let raw = |id: u8| props.iter().find(|p| p.id == id).unwrap().raw.clone();
+        assert_eq!(raw(3), [0x20, 0x21, 0x20 + 72]); // 200 = 1 * 128 + 72
+        assert_eq!(raw(2), [0x20 + 5]);
+        assert_eq!(raw(1), [0x20 + 4]);
+        assert_eq!(raw(32), [0x20 + 60]);
+        assert_eq!(raw(29), [0x20; 3]);
+    }
+
+    #[test]
+    fn prop_edits_refuse_what_does_not_fit() {
+        for bad in [
+            "gralats",
+            "nick=bob",
+            "gralats=-1",
+            "gralats=2097152",
+            "hearts=2.25",
+            "max-hearts=2.5",
+            "hearts=21",
+            "bombs=224",
+            "ap=x",
+        ] {
+            assert!(parse_prop_edit(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse_prop_edit("gralats=2097151").unwrap().1, [0x9f; 3]);
+        let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        r.chests = 1;
+        assert!(props_set(&r, &[]).is_err());
+        let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        r.props.retain(|p| p.id != 35);
+        assert!(props_set(&r, &[]).unwrap_err().contains("35"));
     }
 
     #[test]

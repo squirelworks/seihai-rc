@@ -586,6 +586,7 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
             p.extend_from_slice(rest);
             message(id, &p)
         };
+        let mut props = CAPTURED_72_AFTER_ACCOUNT.to_vec();
         let after_account = |p: &[u8]| -> (Vec<u8>, Vec<u8>) {
             let n = usize::from(p[0] - 0x20);
             (p[1..1 + n].to_vec(), p[1 + n..].to_vec())
@@ -612,11 +613,27 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
                     }
                     84 => rights = after_account(&m.payload).1,
                     73 => {
-                        // The captured 72, for the player asked about.
+                        // The captured 72 (or what a 76 set), for the
+                        // player asked about.
                         let mut r = m.payload.clone();
                         push_gstring(&mut r, b"bob");
-                        r.extend_from_slice(&CAPTURED_72_AFTER_ACCOUNT);
+                        r.extend_from_slice(&props);
                         send_msgs(&mut s, &mut codec, &[message(72, &r)]);
+                    }
+                    74 => {
+                        // By account: player id 0, as the fork sent it.
+                        let (account, _) = after_account(&m.payload);
+                        let mut r = vec![0x20, 0x20];
+                        push_gstring(&mut r, &account);
+                        r.extend_from_slice(&props);
+                        send_msgs(&mut s, &mut codec, &[message(72, &r)]);
+                    }
+                    76 => {
+                        // Everything after the account is the 72 tail, then
+                        // one GCHAR 0.
+                        let rest = after_account(&m.payload).1;
+                        assert_eq!(rest.last(), Some(&0x20));
+                        props = rest[..rest.len() - 1].to_vec();
                     }
                     _ => {}
                 }
@@ -877,4 +894,44 @@ fn players_props_prints_the_captured_reply() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].id, 73);
     assert_eq!(seen[0].payload, b" #");
+}
+
+#[test]
+fn players_props_reads_an_offline_account_by_name() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["props", "carol"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.starts_with("account carol world main (not online)\n"),
+        "{out}"
+    );
+    assert!(out.contains("flags: 0\n"), "{out}");
+    let seen = h.join().unwrap();
+    assert_eq!(seen.len(), 1);
+    // The bytes the real RC sent for an offline account (capture 2).
+    assert_eq!(seen[0].id, 74);
+    assert_eq!(seen[0].payload, b"%carol ");
+}
+
+#[test]
+fn players_props_set_sends_76_and_reads_back() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(&addr, &["props", "bob", "--set", "gralats=7,bombs=9"]);
+    assert!(ok, "{err}");
+    assert!(err.contains("set the props for bob"), "{err}");
+    assert!(out.contains("   3  gralats               7\n"), "{out}");
+    assert!(out.contains("   5  bombs                 9\n"), "{out}");
+    // Online seconds go back as 0, as the real RC sends them.
+    assert!(out.contains("  29  online seconds        0\n"), "{out}");
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [73, 76, 73]);
+    assert!(seen[1].payload.starts_with(b"#bob$main"));
+}
+
+#[test]
+fn players_props_set_refuses_an_unknown_name_before_logging_in() {
+    let (ok, _, err) = run_players("127.0.0.1:1", &["props", "bob", "--set", "nick=x"]);
+    assert!(!ok);
+    assert!(err.contains("not a prop this client sets"), "{err}");
 }

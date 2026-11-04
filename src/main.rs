@@ -11,8 +11,9 @@ use seihai_rc::nc::{
 };
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
-    parse_comments, parse_props, parse_rights, plo as players_plo, private_admin_message,
-    private_message, prop_name, props_get, resolve, rights_get, rights_set, warp_player, Rights,
+    parse_comments, parse_prop_edit, parse_props, parse_rights, plo as players_plo,
+    private_admin_message, private_message, prop_name, props_get, props_get_account, props_set,
+    resolve, rights_get, rights_set, warp_player, PropsReply, Rights,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -33,7 +34,7 @@ USAGE:
   seihai-rc players comments ACCOUNT [--set TEXT | --set-file PATH] (--server ... | ...)
   seihai-rc players ban ACCOUNT [--set on|off [--reason TEXT]] (--server ... | ...)
   seihai-rc players rights ACCOUNT [--set N] [--ip-range R] [--set-file PATH] (--server ...)
-  seihai-rc players props WHO (--server ... | --listserver ... --pick ...)
+  seihai-rc players props WHO [--set NAME=VALUE,...] (--server ... | --listserver ... --pick ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
@@ -66,23 +67,23 @@ USAGE:
                 them from a file, one comment per line. Read back after.
   players ban   Print whether an account is banned on this server, and
                 why (id 87, reply 64). --set on|off with --reason changes
-                it (id 88) and reads it back. The gserver-v2 fork hung
-                after a ban set on an online player in the 2026-11-04 lab.
+                it (id 88) and reads it back.
   players rights
                 Print an account's rights number and set bits, IP range
                 and folder rights (id 83, reply 62). --set N, --ip-range
                 and --set-file (folder rights, one per line) change those
                 fields, keep the rest, send id 84 and read them back.
                 Bit 0 is warp-to-xy and bit 9 admin message.
-  players props Print a player's props, counts and weapons (id 73, reply
-                72). Setting props (id 76) is not sent yet.
+  players props Print a player's props, flags and weapons (id 73, reply
+                72). WHO that is not online is read by account (id 74).
+                --set changes props (id 76) and reads them back; NAME is
+                max-hearts, hearts (halves allowed), gralats, arrows,
+                bombs, glove or ap. The rest is sent back as read.
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
                 WHO is a player id or an account name; the client reads the
                 player list first (--settle) and refuses a WHO not in it.
-                The payloads for 28, 61, 63, 64 and 82 still need a fork lab
-                check; see docs/PROTOCOL.md.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -787,27 +788,48 @@ fn prop_value(id: u8, raw: &[u8]) -> String {
     }
 }
 
-fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
-    let (mut s, c) = players_session(o)?;
-    let e = resolve(&s.players, who)?.clone();
-    if e.is_rc() {
-        return Err(format!("{} {} is an RC, not a player", e.id, e.account));
-    }
-    let msg = props_get(e.id).map_err(|e| e.to_string())?;
+/// Ask for the props of one player (73, by id) or of an account that is
+/// not online (74, by name), and wait for the 72 that answers it.
+fn read_props(s: &mut Session, c: &Common, target: &PropsTarget) -> Result<PropsReply, String> {
+    let (msg, id) = match target {
+        PropsTarget::Online(id, _) => (props_get(*id).map_err(|e| e.to_string())?, *id),
+        PropsTarget::Account(account) => {
+            (props_get_account(account).map_err(|e| e.to_string())?, 0)
+        }
+    };
     s.send_messages(&[msg]).map_err(|e| e.to_string())?;
-    let r = await_reply(
-        &mut s,
-        &c,
+    await_reply(
+        s,
+        c,
         players_plo::RC_PLAYERPROPSGET,
-        &e.account,
+        target.account(),
         |p| {
             parse_props(p)
-                .filter(|r| r.id == e.id)
+                .filter(|r| r.id == id)
                 .map(|r| (r.account.clone(), r))
         },
-    )?;
-    s.close();
-    println!("player {} account {} world {}", r.id, r.account, r.world);
+    )
+}
+
+enum PropsTarget {
+    Online(u16, String),
+    Account(String),
+}
+
+impl PropsTarget {
+    fn account(&self) -> &str {
+        match self {
+            PropsTarget::Online(_, a) | PropsTarget::Account(a) => a,
+        }
+    }
+}
+
+fn print_props(r: &PropsReply) {
+    if r.id == 0 {
+        println!("account {} world {} (not online)", r.account, r.world);
+    } else {
+        println!("player {} account {} world {}", r.id, r.account, r.world);
+    }
     for p in &r.props {
         println!(
             "{:>4}  {:<20}  {}",
@@ -819,11 +841,78 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
     if !r.props_complete {
         println!("(the props block holds more than the prop table could read)");
     }
-    println!("tail counts: {} {}", r.tail_counts.0, r.tail_counts.1);
+    println!("flags: {}", r.flags.len());
+    for f in &r.flags {
+        println!("  {f}");
+    }
+    println!("opened chests: {}", r.chests);
     match &r.weapons {
         Some(w) => println!("weapons: {}", w.join(", ")),
-        None => println!("weapons: not read (a tail count is not 0; that layout is not known)"),
+        None => println!("weapons: not read (the chest count is not 0; that layout is not known)"),
     }
+}
+
+fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
+    let edits = match &o.set {
+        Some(list) => list
+            .split(',')
+            .filter(|i| !i.trim().is_empty())
+            .map(parse_prop_edit)
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
+    if o.set.is_some() && edits.is_empty() {
+        return Err("--set needs NAME=VALUE".into());
+    }
+    let (mut s, c) = players_session(o)?;
+    let digits = !who.is_empty() && who.bytes().all(|b| b.is_ascii_digit());
+    let online = s
+        .players
+        .players
+        .values()
+        .any(|e| e.account.eq_ignore_ascii_case(who));
+    let target = if digits || online {
+        let e = resolve(&s.players, who)?.clone();
+        if e.is_rc() {
+            return Err(format!("{} {} is an RC, not a player", e.id, e.account));
+        }
+        PropsTarget::Online(e.id, e.account)
+    } else {
+        PropsTarget::Account(who.to_string())
+    };
+    let r = read_props(&mut s, &c, &target)?;
+    if edits.is_empty() {
+        s.close();
+        print_props(&r);
+        return Ok(());
+    }
+    let msg = props_set(&r, &edits)?;
+    if r.flags.is_empty() {
+        eprintln!(
+            "note: the server sent no flags, so none go back; a server that stores flags it \
+             does not send (the gserver-v2 fork does) drops them on this set, as it does for \
+             the real RC"
+        );
+    }
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    let back = read_props(&mut s, &c, &target)?;
+    s.close();
+    print_props(&back);
+    let mut wrong = Vec::new();
+    for (id, raw) in &edits {
+        let got = back.props.iter().find(|p| p.id == *id).map(|p| &p.raw);
+        if got != Some(raw) {
+            wrong.push(prop_name(*id).unwrap_or("?"));
+        }
+    }
+    if !wrong.is_empty() {
+        return Err(format!(
+            "sent the props for {}, but the server read back other values for: {}",
+            r.account,
+            wrong.join(", ")
+        ));
+    }
+    eprintln!("set the props for {}", r.account);
     Ok(())
 }
 

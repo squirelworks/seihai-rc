@@ -71,17 +71,27 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       84 bytes against the capture.
 - [x] Props read (73 → 72): `players props WHO`. Evidence: the captured
       72 decodes in a unit test and through the fake gserver.
-- [ ] Props set (76). Layout seen (lab note), but the real RC drops and
-      adds props and zeroes online seconds; work out which props a set
-      should carry, then send it. Also: which tail GSHORT is flags and
-      which chests, and props by account (74, not captured).
-- [ ] List RCs (65). Not in the 2026-11-04 capture.
+- [x] Props by account (74) and props set (76): `players props WHO
+      [--set NAME=VALUE,...]`. A WHO not online is read with 74. The set
+      sends the real RC's prop list (see `docs/PROTOCOL.md`) and reads it
+      back. Evidence: a second real-RC capture and `seihai-rc` live against
+      the fork, offline and online (`docs/lab/2026-11-04-rc-props-set.md`);
+      the builder rebuilds the captured 76 in a unit test.
+- [ ] Props set: more names than max-hearts, hearts, gralats, arrows,
+      bombs, glove and ap; flags and weapons as options; chests once a
+      non-zero count is captured.
+- [ ] Fork: send the stored flags in 72, so a props set keeps them.
+- [ ] List RCs (65). The 2.22 RC (`GSERV024`) sends it from no window, so
+      it needs a newer RC or another source.
 
 ## Stage 3: accounts
 
 `PLI_RC_ACCOUNTLISTGET` (72, with a filter) → `PLO_RC_ACCOUNTLISTGET` (70);
 `PLI_RC_ACCOUNTADD` (70), `ACCOUNTDEL` (71), `ACCOUNTGET` (77) →
-`PLO_RC_ACCOUNTGET` (73), `ACCOUNTSET` (78). All layouts **check**.
+`PLO_RC_ACCOUNTGET` (73), `ACCOUNTSET` (78). The account list (72 → 70)
+and account get and set (77/78 → 73) were seen from the real RC on
+2026-11-04 (`docs/lab/2026-11-04-rc-props-set.md`); the field order after
+the e-mail still needs one run per field. Add and delete are **check**.
 
 ## Stage 4: server
 
