@@ -1,8 +1,9 @@
 //! Stage 2: player actions. Built so far: private messages, the admin
 //! message to everyone and to one player, disconnect, warp, and the
-//! comments and account ban of an account. Props and rights come next.
+//! comments, account ban and rights of an account. Props come next.
 //!
-//! Comments (85/86 → 63) and the ban (87/88 → 64) follow the 2026-11-04
+//! Comments (85/86 → 63), the ban (87/88 → 64) and rights (83/84 → 62)
+//! follow the 2026-11-04
 //! loopback capture of a real RC (`GSERV024`) against the gserver-v2 fork:
 //! `docs/lab/2026-11-04-rc-player-admin.md`.
 //!
@@ -14,8 +15,8 @@
 
 use crate::rc::{PlayerEntry, PlayerList};
 use crate::wire::{
-    gchar, gdetokenize, gtokenize, latin1_bytes, message, push_gshort, push_gstring, read_gstring,
-    text,
+    gchar, gdetokenize, gtokenize, latin1_bytes, message, push_gint5, push_gshort, push_gstring,
+    read_gint5, read_gstring, text,
 };
 
 /// Client to server ids for stage 2 (ids are wire facts).
@@ -74,6 +75,8 @@ pub enum PlayerError {
     LevelTooLong,
     /// An account name is longer than a GSTRING holds.
     AccountTooLong,
+    /// A text longer than its field holds (the field is named).
+    TooLong(&'static str),
 }
 
 impl std::fmt::Display for PlayerError {
@@ -99,6 +102,7 @@ impl std::fmt::Display for PlayerError {
             PlayerError::LevelTooLong => {
                 write!(f, "the level name is longer than {LEVEL_MAX} bytes")
             }
+            PlayerError::TooLong(what) => write!(f, "{what} is too long for its field"),
             PlayerError::AccountTooLong => {
                 write!(f, "the account name is longer than {LEVEL_MAX} bytes")
             }
@@ -290,6 +294,73 @@ pub fn parse_ban(payload: &[u8]) -> Option<Ban> {
     })
 }
 
+/// Rights bits seen in the 2026-11-04 capture. The dialog lists its
+/// checkboxes in bit order from bit 0; only these two were ticked there.
+pub const RIGHT_WARPTO_XY: u32 = 1 << 0;
+pub const RIGHT_ADMIN_MESSAGE: u32 = 1 << 9;
+
+/// One account's staff rights, as 62 carries them and 84 sends them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rights {
+    pub account: String,
+    /// GINT5 bit set; see [`RIGHT_WARPTO_XY`] and [`RIGHT_ADMIN_MESSAGE`].
+    pub rights: u32,
+    pub ip_range: String,
+    /// Folder rights, one per line (`rw levels/*`).
+    pub folders: Vec<String>,
+}
+
+/// Id 83, `PLI_RC_PLAYERRIGHTSGET`: the account as the rest of the line.
+pub fn rights_get(account: &str) -> Result<Vec<u8>, PlayerError> {
+    Ok(message(pli::RC_PLAYERRIGHTSGET, &account_bytes(account)?))
+}
+
+/// Id 84, `PLI_RC_PLAYERRIGHTSSET`: GSTRING account, GINT5 rights, GSTRING
+/// IP range, GSHORT length, then the folder lines tokenized (capture,
+/// 2026-11-04).
+pub fn rights_set(r: &Rights) -> Result<Vec<u8>, PlayerError> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, &account_bytes(&r.account)?);
+    push_gint5(&mut payload, r.rights);
+    let ip = latin1_bytes(&r.ip_range);
+    if r.ip_range.contains(['\n', '\r']) {
+        return Err(PlayerError::LineBreak("the IP range"));
+    }
+    if ip.len() > LEVEL_MAX {
+        return Err(PlayerError::TooLong("the IP range"));
+    }
+    push_gstring(&mut payload, &ip);
+    if r.folders.iter().any(|l| l.contains(['\n', '\r'])) {
+        return Err(PlayerError::LineBreak("a folder line"));
+    }
+    let folders = latin1_bytes(&gtokenize(&r.folders.join("\n")));
+    if folders.len() > usize::from(GSHORT_MAX) {
+        return Err(PlayerError::TooLong("the folder rights"));
+    }
+    push_gshort(&mut payload, folders.len() as u16);
+    payload.extend_from_slice(&folders);
+    Ok(message(pli::RC_PLAYERRIGHTSSET, &payload))
+}
+
+/// Read id 62: the same layout as 84. The folder text is read as tokenized
+/// lines, so the fork's untokenized `rw levels/*` stays one line (the real
+/// RC splits it at the space). A GSHORT length that runs past the message
+/// is refused.
+pub fn parse_rights(payload: &[u8]) -> Option<Rights> {
+    let mut i = 0;
+    let account = text(&read_gstring(payload, &mut i)?);
+    let rights = read_gint5(payload, &mut i)?;
+    let ip_range = text(&read_gstring(payload, &mut i)?);
+    let n = usize::from(seihai_core::protocol::read_gshort(payload.get(i..)?)?);
+    let folders = payload.get(i + 2..i + 2 + n)?;
+    Some(Rights {
+        account,
+        rights,
+        ip_range,
+        folders: gdetokenize(&text(folders)),
+    })
+}
+
 /// Find one player by id (digits) or by exact account name in `list`.
 /// An account that more than one entry has is refused, so a script never
 /// acts on the wrong one.
@@ -373,6 +444,50 @@ mod tests {
         assert!(on.banned);
         assert_eq!(on.reason, ["lab ban reason"]);
         assert!(parse_ban(b"%test1").is_none());
+    }
+
+    #[test]
+    fn rights_match_the_capture() {
+        // 83 + 0x20 = 's'; 84 + 0x20 = 't'.
+        assert_eq!(rights_get("test1").unwrap(), b"stest1");
+        let set = Rights {
+            account: "test1".into(),
+            rights: RIGHT_WARPTO_XY | RIGHT_ADMIN_MESSAGE,
+            ip_range: "0.0.0.0".into(),
+            folders: vec!["rw levels/*".into()],
+        };
+        assert_eq!(
+            rights_set(&set).unwrap(),
+            b"t%test1   $!'0.0.0.0 -\"rw levels/*\""
+        );
+        // The empty reply before the set.
+        assert_eq!(
+            parse_rights(b"%test1     '0.0.0.0  ").unwrap(),
+            Rights {
+                account: "test1".into(),
+                rights: 0,
+                ip_range: "0.0.0.0".into(),
+                folders: vec![],
+            }
+        );
+        // The fork's readback: folder text untokenized, 11 bytes.
+        let back = parse_rights(b"%test1   $!'0.0.0.0 +rw levels/*").unwrap();
+        assert_eq!(back.rights, 513);
+        assert_eq!(back.folders, ["rw levels/*"]);
+        // The tokenized form a server should send reads the same.
+        assert_eq!(parse_rights(&set_payload(&set)).unwrap(), set);
+        // A length past the end is refused.
+        assert!(parse_rights(b"%test1   $!'0.0.0.0 /rw").is_none());
+        let mut bad = set.clone();
+        bad.folders = vec!["a\nb".into()];
+        assert_eq!(
+            rights_set(&bad),
+            Err(PlayerError::LineBreak("a folder line"))
+        );
+    }
+
+    fn set_payload(r: &Rights) -> Vec<u8> {
+        rights_set(r).unwrap()[1..].to_vec()
     }
 
     #[test]

@@ -11,8 +11,8 @@ use seihai_rc::nc::{
 };
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
-    parse_comments, plo as players_plo, private_admin_message, private_message, resolve,
-    warp_player,
+    parse_comments, parse_rights, plo as players_plo, private_admin_message, private_message,
+    resolve, rights_get, rights_set, warp_player, Rights,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -32,6 +32,7 @@ USAGE:
   seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players comments ACCOUNT [--set TEXT | --set-file PATH] (--server ... | ...)
   seihai-rc players ban ACCOUNT [--set on|off [--reason TEXT]] (--server ... | ...)
+  seihai-rc players rights ACCOUNT [--set N] [--ip-range R] [--set-file PATH] (--server ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
@@ -66,6 +67,12 @@ USAGE:
                 why (id 87, reply 64). --set on|off with --reason changes
                 it (id 88) and reads it back. The gserver-v2 fork hung
                 after a ban set on an online player in the 2026-11-04 lab.
+  players rights
+                Print an account's rights number and set bits, IP range
+                and folder rights (id 83, reply 62). --set N, --ip-range
+                and --set-file (folder rights, one per line) change those
+                fields, keep the rest, send id 84 and read them back.
+                Bit 0 is warp-to-xy and bit 9 admin message.
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
@@ -116,7 +123,10 @@ OPTIONS:
   --image NAME         Weapon image for weapon set.
   --set VALUE          players comments: the new comments (one line).
                        players ban: on or off.
+                       players rights: the rights number.
   --set-file PATH      players comments: the new comments, one per line.
+                       players rights: the folder rights, one per line.
+  --ip-range RANGE     players rights: the new IP range.
   --reason TEXT        players ban --set: the reason (default empty).
   --secure-login       Ask the listserver for the RC list through the
                        secure handshake (id 5, token SEI00001). The account
@@ -150,6 +160,7 @@ struct Opts {
     set: Option<String>,
     set_file: Option<String>,
     reason: Option<String>,
+    ip_range: Option<String>,
     server_key: Option<String>,
     script_flag: bool,
     secure_login: bool,
@@ -195,6 +206,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--set" => o.set = Some(val!(&a)),
             "--set-file" => o.set_file = Some(val!(&a)),
             "--reason" => o.reason = Some(val!(&a)),
+            "--ip-range" => o.ip_range = Some(val!(&a)),
             "--server-key" => o.server_key = Some(val!(&a)),
             "--secure-login" => o.secure_login = true,
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
@@ -666,6 +678,84 @@ fn cmd_players_ban(o: &Opts, account: &str) -> Result<(), String> {
                 if ban.banned { "on" } else { "off" }
             ));
         }
+    }
+    Ok(())
+}
+
+fn read_rights(s: &mut Session, c: &Common, account: &str) -> Result<Rights, String> {
+    let msg = rights_get(account).map_err(|e| e.to_string())?;
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    await_reply(s, c, players_plo::RC_PLAYERRIGHTSGET, account, |p| {
+        parse_rights(p).map(|r| (r.account.clone(), r))
+    })
+}
+
+/// The bits set in `rights`, as `0, 9`.
+fn bit_list(rights: u32) -> String {
+    let bits: Vec<String> = (0..32)
+        .filter(|b| rights & (1 << b) != 0)
+        .map(|b| b.to_string())
+        .collect();
+    if bits.is_empty() {
+        "none".into()
+    } else {
+        bits.join(", ")
+    }
+}
+
+fn cmd_players_rights(o: &Opts, account: &str) -> Result<(), String> {
+    let new_rights = match &o.set {
+        Some(v) => Some(
+            v.parse::<u32>()
+                .map_err(|_| format!("--set: not a rights number: {v}"))?,
+        ),
+        None => None,
+    };
+    let new_folders = match &o.set_file {
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .map_err(|e| format!("{path}: {e}"))?
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        ),
+        None => None,
+    };
+    let change = new_rights.is_some() || new_folders.is_some() || o.ip_range.is_some();
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let mut r = read_rights(&mut s, &c, account)?;
+    if change {
+        let mut want = r.clone();
+        if let Some(n) = new_rights {
+            want.rights = n;
+        }
+        if let Some(ip) = &o.ip_range {
+            want.ip_range = ip.clone();
+        }
+        if let Some(lines) = new_folders {
+            want.folders = lines;
+        }
+        let msg = rights_set(&want).map_err(|e| e.to_string())?;
+        s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+        r = read_rights(&mut s, &c, account)?;
+        if r.rights != want.rights || r.ip_range != want.ip_range || r.folders != want.folders {
+            s.close();
+            return Err(format!(
+                "sent the rights for {account}, but the server read back rights {}, \
+                 IP range {:?} and {} folder line(s)",
+                r.rights,
+                r.ip_range,
+                r.folders.len()
+            ));
+        }
+    }
+    s.close();
+    println!("account: {}", r.account);
+    println!("rights: {} (bits: {})", r.rights, bit_list(r.rights));
+    println!("ip range: {}", r.ip_range);
+    for line in &r.folders {
+        println!("folder: {line}");
     }
     Ok(())
 }
@@ -1163,6 +1253,7 @@ fn main() -> ExitCode {
         }
         ["players", "comments", account] => cmd_players_comments(&o, account),
         ["players", "ban", account] => cmd_players_ban(&o, account),
+        ["players", "rights", account] => cmd_players_rights(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),
@@ -1230,6 +1321,12 @@ mod tests {
         assert_eq!(o.cmd, ["players", "pm", "2,bob", "hello", "there"]);
         assert_eq!(parse_tiles("X", "30.5"), Ok(30.5));
         assert!(parse_tiles("X", "east").is_err());
+    }
+
+    #[test]
+    fn rights_bits_are_listed() {
+        assert_eq!(bit_list(513), "0, 9");
+        assert_eq!(bit_list(0), "none");
     }
 
     #[test]
