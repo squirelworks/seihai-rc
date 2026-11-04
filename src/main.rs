@@ -9,7 +9,9 @@ use seihai_rc::nc::{
     npc_get_message, npc_script_get_message, npc_script_set_message, weapon_delete_message,
     weapon_get_message, weapon_list_message, weapon_set_message, NcEvent, NcSession,
 };
-use seihai_rc::players::{admin_message, disconnect_player, private_message, resolve, warp_player};
+use seihai_rc::players::{
+    admin_message, disconnect_player, private_admin_message, private_message, resolve, warp_player,
+};
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
 };
@@ -24,6 +26,7 @@ USAGE:
   seihai-rc players list (--server ... | --listserver ... --pick ...)
                     --account NAME [--tsv] [--settle MS] [options]
   seihai-rc players pm WHO[,WHO...] TEXT... (--server ... | --listserver ... --pick ...)
+  seihai-rc players admin-pm WHO TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
@@ -49,12 +52,14 @@ USAGE:
   players list  Log in and print the players and RCs online.
   players pm    Private message (id 28) to one or more players or RCs.
   players say   Admin message to everyone online (id 63).
+  players admin-pm
+                Admin message to one player or RC (id 64).
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
                 WHO is a player id or an account name; the client reads the
                 player list first (--settle) and refuses a WHO not in it.
-                The payloads for 28, 61, 63 and 82 still need a fork lab
+                The payloads for 28, 61, 63, 64 and 82 still need a fork lab
                 check; see docs/PROTOCOL.md.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
@@ -501,6 +506,17 @@ fn cmd_players_say(o: &Opts, words: &[&str]) -> Result<(), String> {
     let (mut s, c) = players_session(o)?;
     send_and_settle(&mut s, o, &c, msg)?;
     println!("sent admin message");
+    s.close();
+    Ok(())
+}
+
+fn cmd_players_admin_pm(o: &Opts, who: &str, words: &[&str]) -> Result<(), String> {
+    let text = words.join(" ");
+    let (mut s, c) = players_session(o)?;
+    let e = resolve(&s.players, who)?.clone();
+    let msg = private_admin_message(e.id, &text).map_err(|e| e.to_string())?;
+    send_and_settle(&mut s, o, &c, msg)?;
+    println!("sent admin message to {} {}", e.id, e.account);
     s.close();
     Ok(())
 }
@@ -993,6 +1009,9 @@ fn main() -> ExitCode {
         ["players", "list"] | ["players"] => cmd_players_list(&o),
         ["players", "pm", who, words @ ..] if !words.is_empty() => cmd_players_pm(&o, who, words),
         ["players", "say", words @ ..] if !words.is_empty() => cmd_players_say(&o, words),
+        ["players", "admin-pm", who, words @ ..] if !words.is_empty() => {
+            cmd_players_admin_pm(&o, who, words)
+        }
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["nc", "login"] => cmd_nc_login(&o),

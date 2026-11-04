@@ -1,11 +1,12 @@
-//! Stage 2: player actions. This first slice builds private messages,
-//! the admin message to everyone, disconnect and warp. Props, rights,
-//! comments and the local ban come later.
+//! Stage 2: player actions. Built so far: private messages, the admin
+//! message to everyone and to one player, disconnect and warp. Props,
+//! rights, comments, the local ban and the RC list come later; our notes
+//! have no payload layout for them yet.
 //!
 //! Plan and message table: `docs/NEXT.md`. How to add a message:
 //! `docs/ARCHITECTURE.md`, "Where new features go". Each builder has a
 //! byte-exact unit test and a case in `tests/fake_servers.rs`. The layouts
-//! for 28, 61, 63 and 82 below are what this client sends; they are marked
+//! for 28, 61, 63, 64 and 82 below are what this client sends; they are marked
 //! **check** in `docs/PROTOCOL.md` until a fork lab run confirms them.
 
 use crate::rc::{PlayerEntry, PlayerList};
@@ -143,6 +144,18 @@ pub fn private_message(ids: &[u16], text: &str) -> Result<Vec<u8>, PlayerError> 
     Ok(message(pli::PRIVATEMESSAGE, &payload))
 }
 
+/// Id 64, `PLI_RC_PRIVADMINMESSAGE`: GSHORT player id, then the text as
+/// the rest of the line. The admin message for one player
+/// (`players admin-pm`).
+pub fn private_admin_message(id: u16, text: &str) -> Result<Vec<u8>, PlayerError> {
+    check_id(id)?;
+    let body = line_bytes("the message", text)?;
+    let mut payload = Vec::with_capacity(2 + body.len());
+    push_gshort(&mut payload, id);
+    payload.extend_from_slice(&body);
+    Ok(message(pli::RC_PRIVADMINMESSAGE, &payload))
+}
+
 /// Id 61, `PLI_RC_DISCONNECTPLAYER`: GSHORT player id, nothing after it.
 pub fn disconnect_player(id: u16) -> Result<Vec<u8>, PlayerError> {
     check_id(id)?;
@@ -261,6 +274,27 @@ mod tests {
     fn private_message_text_is_latin1() {
         let m = private_message(&[1], "caf\u{e9} \u{263a}").unwrap();
         assert_eq!(&m[5..], b"caf\xe9 ?");
+    }
+
+    #[test]
+    fn private_admin_message_is_the_id_then_text() {
+        // 64 + 0x20 = '`'; id 130 = (1 << 7) | 2.
+        assert_eq!(
+            private_admin_message(130, "Stop that").unwrap(),
+            b"`!\"Stop that"
+        );
+        assert_eq!(
+            private_admin_message(2, "a\nb"),
+            Err(PlayerError::LineBreak("the message"))
+        );
+        assert_eq!(
+            private_admin_message(2, ""),
+            Err(PlayerError::Empty("the message"))
+        );
+        assert_eq!(
+            private_admin_message(GSHORT_MAX + 1, "x"),
+            Err(PlayerError::BadId(GSHORT_MAX + 1))
+        );
     }
 
     #[test]
