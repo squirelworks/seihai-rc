@@ -62,6 +62,13 @@ After the login the RC may send its nickname: `PLI_PLAYERPROPS` (2) + prop 0
 (GSTRING). With none, the fork shows `*account`. RC chat lines go out as
 `PLI_RC_CHAT` (79) + text.
 
+While the session is open, seihai-rc sends id 162 with an empty body every
+60 s. That is the RC keepalive (the 2010 RC and RC3). Game clients use the
+same id to answer a server 108, which this client does not send. The
+NPC-Control socket does not send 162: on that socket it is the server's
+class script. If the server sends 124, seihai-rc prints the raw bytes in
+hex and does not parse them. The layout of 124 is unknown.
+
 ## RC list from the listserver
 
 1. Plain zlib frame: id 5 + GCHAR key + 8-byte token.

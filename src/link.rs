@@ -115,6 +115,17 @@ pub struct Link {
     closed: bool,
 }
 
+/// The peer has gone. macOS surfaces this on a write (`BrokenPipe`);
+/// Linux more often surfaces it on the next read (`ConnectionReset`).
+fn peer_closed(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+    )
+}
+
 /// Resolve `addr` (`host:port`) to its first socket address.
 pub fn resolve(addr: &str) -> io::Result<SocketAddr> {
     addr.to_socket_addrs()?
@@ -149,8 +160,7 @@ impl Link {
     /// plain frames, C1 and C2, and only then switches to gen 5.
     pub fn send_plain(&mut self, body: &[u8]) -> io::Result<()> {
         let frame = write_zlib_frame(body)?;
-        self.stream.write_all(&frame)?;
-        self.stream.flush()
+        self.write_frame(&frame)
     }
 
     /// Use `codec` for every frame after this call.
@@ -172,8 +182,7 @@ impl Link {
             body.push(b'\n');
         }
         let frame = self.codec.encode(&body)?;
-        self.stream.write_all(&frame)?;
-        self.stream.flush()
+        self.write_frame(&frame)
     }
 
     /// Send a frame body that is already complete, including any raw block.
@@ -183,8 +192,26 @@ impl Link {
     /// file contains line feeds.
     pub fn send_body(&mut self, body: &[u8]) -> io::Result<()> {
         let frame = self.codec.encode(body)?;
-        self.stream.write_all(&frame)?;
-        self.stream.flush()
+        self.write_frame(&frame)
+    }
+
+    /// Write one frame. A peer that has already gone marks the link
+    /// closed and returns that error. macOS reports the close as a
+    /// broken pipe on this write; Linux often accepts the write and
+    /// reports a reset on the next read.
+    fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        match self
+            .stream
+            .write_all(frame)
+            .and_then(|_| self.stream.flush())
+        {
+            Ok(()) => Ok(()),
+            Err(e) if peer_closed(&e) => {
+                self.closed = true;
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// True once the peer has closed the link.
@@ -228,14 +255,7 @@ impl Link {
                             | io::ErrorKind::TimedOut
                             | io::ErrorKind::Interrupted
                     ) => {}
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-                    ) =>
-                {
-                    self.closed = true
-                }
+                Err(e) if peer_closed(&e) => self.closed = true,
                 Err(e) => return Err(e),
             }
         }
@@ -264,6 +284,41 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn send_after_peer_close_marks_the_link_closed() {
+        // Loopback only. The peer accepts and drops. Linux often accepts
+        // one more write and then returns a broken pipe; the link has to
+        // record that close either way. The server must not block in a
+        // read: this thread joins it before it writes.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let mut link = Link::connect(&addr.to_string(), Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let mut saw_peer_closed = false;
+        for _ in 0..5 {
+            match link.send(&[b"a".to_vec()]) {
+                Ok(()) => thread::sleep(Duration::from_millis(20)),
+                Err(e) if peer_closed(&e) => {
+                    saw_peer_closed = true;
+                    break;
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert!(
+            saw_peer_closed,
+            "a write after the peer dropped should surface as a close"
+        );
+        assert!(link.is_closed());
+    }
 
     #[test]
     fn gen5_round_trip_all_sizes() {
