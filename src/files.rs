@@ -1,58 +1,60 @@
 //! File link on an RC session: list a directory, fetch a file, send a file.
 //!
-//! The ids are the file-browser ids named in `docs/NEXT.md`. This repo does
-//! not describe the payloads. What follows is the smallest framing that
-//! fits the codec this crate already uses (`GSTRING`, `GSHORT`, `GINT3`,
-//! and the raw block `split_messages` keeps intact). A level file contains
-//! line feeds, and [`crate::link::Link::send`] refuses a line feed inside an
-//! ordinary message, so the file bytes travel in a raw block.
+//! The widths are the ones the gserver-v2 fork used on the loopback run of
+//! 2026-11-01 (`docs/lab/2026-11-01-file-widths.md`). A level file contains
+//! line feeds. [`crate::link::Link::send`] refuses a line feed inside an
+//! ordinary message, so a file travels in a raw block.
 //!
 //! # Payload fields
 //!
-//! A loopback run against the gserver-v2 fork (2026-11-01,
-//! `docs/lab/2026-11-01-file-widths.md`) did not match this layout. The
-//! client still sends it. Do not treat it as what that fork sends.
+//! - List, id [`pli::RC_FILEBROWSER_CD`] (90): the folder is the rest of the
+//!   line. There is no length byte. `""` sends an empty payload. The fork
+//!   answers only when that text is a folder the account may open, and the
+//!   folders it stores end in `/` when the right looks like `world/*`.
+//! - Directory, id [`plo::RC_FILEBROWSER_DIR`] (66): a `GSTRING` folder, then
+//!   one record per file. Each record is a space, a `GCHAR` length, a
+//!   `GSTRING` name, a `GSTRING` rights text, a `GINT5` size and a `GINT5`
+//!   modification time. Id 65 is not this reply.
+//! - The line before that directory is id [`plo::RC_FILEBROWSER_MESSAGE`]
+//!   (67), `Folder changed to ` and the folder. Any other id 67 is a refusal.
+//! - Get, id [`pli::RC_FILEBROWSER_DOWN`] (92): the path is the rest of the
+//!   line. There is no length byte. The fork joins it to the folder from the
+//!   last list.
+//! - File, id [`PLO_FILE`] (102), inside a raw block of id [`PLO_RAWDATA`]
+//!   (100): a `GINT5` modification time, a `GCHAR` name length, the name, then
+//!   the file bytes. The 2026-11-01 payload began `26 77 3a 62 7e 33` and then
+//!   `onlinestartlocal.nw`: those six bytes are the time and the length
+//!   (`0x33` is 19, the length of that name). There is no `GINT3` size. The
+//!   raw block's length counts one line feed after the file; that byte is
+//!   not part of the file. `split_messages` already unwraps id 100, so the
+//!   session sees id 102.
+//! - Put, id [`pli::RC_FILEBROWSER_UP`] (93), inside a raw block of id
+//!   [`PLI_RAWDATA`] (50): a `GSTRING` name, then the file bytes. No size
+//!   field. The fork answers id 67, `Uploaded file ` and the name. Any other
+//!   id 67 is a refusal.
 //!
-//! - List request, id [`pli::RC_FILEBROWSER_CD`] (90): one `GSTRING` path.
-//!   `""` means the world root. Whether id 89 `START` has to come first is
-//!   unchecked; this client does not send it.
-//! - Name list, id [`plo::RC_FILEBROWSER_DIRLIST`] (65): a `GSHORT` count,
-//!   then that many `GSTRING` names. No size and no directory flag. The
-//!   count being a `GSHORT` (not a `GCHAR`) is unchecked.
-//! - Get request, id [`pli::RC_FILEBROWSER_DOWN`] (92): one `GSTRING` path.
-//! - File bytes, inbound: a raw block of id [`PLO_RAWDATA`] (100), then a
-//!   message of id [`plo::RC_FILEBROWSER_DIR`] (66) whose payload is a
-//!   `GSTRING` name, a `GINT3` size, and that many bytes. The id 66, the
-//!   name field and the `GINT3` are all unchecked. Id 100 is used because
-//!   `split_messages` already treats it as a raw block.
-//! - File bytes, outbound: the same name, `GINT3` and bytes, in a message
-//!   of id [`pli::RC_FILEBROWSER_UP`] (93), wrapped in a raw block of id
-//!   [`PLI_RAWDATA`] (50). Id 50 is the outbound raw id named in the
-//!   NPC-Control section of `docs/PROTOCOL.md`. Copying the inbound `GINT3`
-//!   header onto it is unchecked, and `split_messages` does not treat id 50
-//!   as raw.
-//! - Refusal, id [`plo::RC_FILEBROWSER_MESSAGE`] (67): the text.
-//!
-//! Not sent, layouts unknown: 89, 91, 96, 97, 98, 155, 156, 160. A file
-//! over [`MAX_FILE_BYTES`] is refused. One frame length is a `u16`, and the
-//! large-file ids are how a bigger file would travel once a lab run shows
-//! their layout.
+//! Not sent: 89, 91, 96, 97, 98, 155, 156, 160. A file over [`MAX_FILE_BYTES`]
+//! is refused. One frame length is a `u16`, and the large-file ids are how a
+//! bigger file would travel once a lab run shows their layout.
 
 use std::io;
 use std::time::{Duration, Instant};
 
-use seihai_core::protocol::{read_gint3, read_gshort};
-
 use crate::rc::{Event, Session};
-use crate::wire::{gchar, latin1_bytes, message, push_gstring, read_gstring, text};
+use crate::wire::{gchar, latin1_bytes, message, push_gstring, read_gint5, read_gstring, text};
 
 /// Client to server. Raw block: this id, a `GINT3` byte count, a line feed,
-/// then that many bytes. Named in `docs/PROTOCOL.md` as the outbound raw id.
+/// then that many bytes. The put message sits in one of these, because a
+/// file may contain a line feed.
 pub const PLI_RAWDATA: u8 = 50;
 
 /// Server to client. The same header shape. `split_messages` keeps the
-/// following bytes together, line feeds included.
+/// following bytes together, line feeds included, and returns the message
+/// inside.
 pub const PLO_RAWDATA: u8 = 100;
+
+/// Server to client. The file inside a [`PLO_RAWDATA`] block.
+pub const PLO_FILE: u8 = 102;
 
 /// Largest file [`Session::put_file`] sends and [`Session::get_file`] accepts.
 ///
@@ -65,11 +67,11 @@ pub const MAX_FILE_BYTES: usize = 60 * 1024;
 pub mod pli {
     /// Not sent. Payload unchecked.
     pub const RC_FILEBROWSER_START: u8 = 89;
-    /// List the directory in the `GSTRING` path.
+    /// List the folder named by the rest of the line.
     pub const RC_FILEBROWSER_CD: u8 = 90;
     /// Not sent. Payload unchecked.
     pub const RC_FILEBROWSER_END: u8 = 91;
-    /// Fetch the file in the `GSTRING` path.
+    /// Fetch the file named by the rest of the line.
     pub const RC_FILEBROWSER_DOWN: u8 = 92;
     /// Send a file. The message sits inside [`super::PLI_RAWDATA`].
     pub const RC_FILEBROWSER_UP: u8 = 93;
@@ -89,13 +91,20 @@ pub mod pli {
 
 /// Server to client file-browser ids.
 pub mod plo {
-    /// Directory names. `GSHORT` count, then that many `GSTRING` names.
+    /// Sent by id 89, which this client does not send. Not the directory.
     pub const RC_FILEBROWSER_DIRLIST: u8 = 65;
-    /// File body, inside [`super::PLO_RAWDATA`]. Payload unchecked.
+    /// The directory. See [`super::parse_dir`].
     pub const RC_FILEBROWSER_DIR: u8 = 66;
-    /// A refusal. The payload is text.
+    /// A line of text. `Folder changed to ` and `Uploaded file ` are the
+    /// answers to list and put. Any other text is a refusal.
     pub const RC_FILEBROWSER_MESSAGE: u8 = 67;
 }
+
+/// The id 67 line that comes before a directory.
+const FOLDER_CHANGED: &str = "Folder changed to ";
+
+/// The id 67 line that means a put was stored.
+const UPLOADED: &str = "Uploaded file ";
 
 /// Why a list, get or put failed.
 #[derive(Debug)]
@@ -107,14 +116,14 @@ pub enum FileError {
     Closed,
     /// No file reply before the timeout.
     Timeout,
-    /// A length ran past the payload, or a size did not match the bytes.
+    /// A length ran past the payload, or a record did not match its length.
     Malformed(String),
     /// `len` bytes is over [`MAX_FILE_BYTES`].
     TooLarge {
         len: usize,
         max: usize,
     },
-    /// The path is absolute, walks up with `..`, or does not fit a `GSTRING`.
+    /// The path is absolute, walks up with `..`, or is too long.
     InvalidPath(String),
 }
 
@@ -155,7 +164,7 @@ impl From<io::Error> for FileError {
     }
 }
 
-/// `GINT3`: three GCHARs, high 7 bits first. Matches `read_gint3`.
+/// `GINT3`: three GCHARs, high 7 bits first. The raw-block header uses it.
 fn push_gint3(out: &mut Vec<u8>, n: usize) {
     out.push(gchar(((n >> 14) & 0x7F) as u8));
     out.push(gchar(((n >> 7) & 0x7F) as u8));
@@ -172,7 +181,11 @@ fn raw_block(id: u8, inner: &[u8]) -> Vec<u8> {
     body
 }
 
-/// Relative `/` path as Latin-1, or an error. `allow_empty` is the world root.
+/// Relative `/` path as Latin-1, or an error. `allow_empty` is the list of
+/// an empty folder name.
+///
+/// A single trailing `/` is kept: the fork's folder for a right such as
+/// `world/*` is `world/`.
 fn path_bytes(path: &str, allow_empty: bool) -> Result<Vec<u8>, FileError> {
     if path.is_empty() {
         return if allow_empty {
@@ -186,7 +199,13 @@ fn path_bytes(path: &str, allow_empty: bool) -> Result<Vec<u8>, FileError> {
             "path is absolute; the file link is relative to the world".into(),
         ));
     }
-    for seg in path.split('/') {
+    let check = path.strip_suffix('/').unwrap_or(path);
+    if check.is_empty() {
+        return Err(FileError::InvalidPath(
+            "path is absolute; the file link is relative to the world".into(),
+        ));
+    }
+    for seg in check.split('/') {
         if seg.is_empty() || seg == ".." || seg.contains('\\') || seg.contains(':') {
             return Err(FileError::InvalidPath(format!(
                 "path leaves the world or is not /-separated: {path}"
@@ -194,33 +213,31 @@ fn path_bytes(path: &str, allow_empty: bool) -> Result<Vec<u8>, FileError> {
         }
     }
     let bytes = latin1_bytes(path);
+    // Put's name is one GCHAR, so 223 is the longest name that can be sent.
+    // List and get are the rest of a line; the same cap keeps one path check.
     if bytes.len() > 223 || bytes.contains(&b'\n') || bytes.contains(&0u8) {
         return Err(FileError::InvalidPath(
-            "path does not fit in one GSTRING".into(),
+            "path is longer than 223 bytes".into(),
         ));
     }
     Ok(bytes)
 }
 
-/// List request. The path is one `GSTRING` (lab-unconfirmed; see the module).
+/// List request. The folder is the rest of the line.
 pub fn cd_message(dir: &str) -> Result<Vec<u8>, FileError> {
     let path = path_bytes(dir, true)?;
-    let mut payload = Vec::new();
-    push_gstring(&mut payload, &path);
-    Ok(message(pli::RC_FILEBROWSER_CD, &payload))
+    Ok(message(pli::RC_FILEBROWSER_CD, &path))
 }
 
-/// Get request. The path is one `GSTRING` (lab-unconfirmed).
+/// Get request. The path is the rest of the line.
 pub fn down_message(path: &str) -> Result<Vec<u8>, FileError> {
     let path = path_bytes(path, false)?;
-    let mut payload = Vec::new();
-    push_gstring(&mut payload, &path);
-    Ok(message(pli::RC_FILEBROWSER_DOWN, &payload))
+    Ok(message(pli::RC_FILEBROWSER_DOWN, &path))
 }
 
 /// Put body, ready for [`crate::link::Link::send_body`].
 ///
-/// The raw header id and the `GINT3` size are lab-unconfirmed. A file over
+/// The name is a `GSTRING`. The bytes that follow are the file. A file over
 /// [`MAX_FILE_BYTES`] is refused and nothing is built for it.
 pub fn upload_body(path: &str, data: &[u8]) -> Result<Vec<u8>, FileError> {
     if data.len() > MAX_FILE_BYTES {
@@ -230,64 +247,77 @@ pub fn upload_body(path: &str, data: &[u8]) -> Result<Vec<u8>, FileError> {
         });
     }
     let path = path_bytes(path, false)?;
-    let mut inner = Vec::with_capacity(5 + path.len() + data.len());
+    let mut inner = Vec::with_capacity(2 + path.len() + data.len());
     inner.push(gchar(pli::RC_FILEBROWSER_UP));
     push_gstring(&mut inner, &path);
-    push_gint3(&mut inner, data.len());
     inner.extend_from_slice(data);
     Ok(raw_block(PLI_RAWDATA, &inner))
 }
 
-/// Names from a directory-list payload.
+/// File names from a directory payload (id 66).
 ///
-/// The `GSHORT` count and the `GSTRING` names are lab-unconfirmed. A count
-/// or a name length that runs past the payload is an error.
-pub fn parse_dir_list(payload: &[u8]) -> Result<Vec<String>, FileError> {
-    let count = read_gshort(payload)
-        .ok_or_else(|| FileError::malformed("directory list is shorter than a count"))?
-        as usize;
-    let mut i = 2;
+/// The folder name is skipped. A length that runs past the payload, or a
+/// record that does not fill its `GCHAR` length, is an error.
+pub fn parse_dir(payload: &[u8]) -> Result<Vec<String>, FileError> {
+    let mut i = 0;
+    read_gstring(payload, &mut i)
+        .ok_or_else(|| FileError::malformed("directory folder length runs past the payload"))?;
     let mut names = Vec::new();
-    for n in 0..count {
-        let raw = read_gstring(payload, &mut i).ok_or_else(|| {
-            FileError::malformed(format!("name {n} length runs past the directory list"))
-        })?;
-        names.push(text(&raw));
-    }
-    if i != payload.len() {
-        return Err(FileError::malformed("bytes left after the directory names"));
+    while i < payload.len() {
+        if payload[i] != b' ' {
+            return Err(FileError::malformed(
+                "directory entry does not start with a space",
+            ));
+        }
+        i += 1;
+        let n = payload
+            .get(i)
+            .ok_or_else(|| FileError::malformed("directory entry length runs past the payload"))?;
+        let n = usize::from(n.wrapping_sub(0x20));
+        i += 1;
+        let Some(entry) = payload.get(i..i + n) else {
+            return Err(FileError::malformed(
+                "directory entry length runs past the payload",
+            ));
+        };
+        i += n;
+        let mut j = 0;
+        let name = read_gstring(entry, &mut j)
+            .ok_or_else(|| FileError::malformed("file name length runs past the entry"))?;
+        read_gstring(entry, &mut j)
+            .ok_or_else(|| FileError::malformed("rights length runs past the entry"))?;
+        read_gint5(entry, &mut j)
+            .ok_or_else(|| FileError::malformed("file size is shorter than a GINT5"))?;
+        read_gint5(entry, &mut j)
+            .ok_or_else(|| FileError::malformed("modification time is shorter than a GINT5"))?;
+        if j != entry.len() {
+            return Err(FileError::malformed("bytes left in a directory entry"));
+        }
+        names.push(text(&name));
     }
     Ok(names)
 }
 
-/// `(name, bytes)` from a file-message payload.
+/// `(name, bytes)` from an id 102 payload.
 ///
-/// The name and the `GINT3` size are lab-unconfirmed. A size over
-/// [`MAX_FILE_BYTES`] is refused without copying those bytes out. A size
-/// that does not match the bytes that follow is an error.
+/// The first five bytes are the modification time. The name is a `GSTRING`.
+/// One trailing line feed is the raw block's extra byte and is dropped. A
+/// file over [`MAX_FILE_BYTES`] is refused.
 pub fn parse_file_body(payload: &[u8]) -> Result<(String, Vec<u8>), FileError> {
     let mut i = 0;
+    read_gint5(payload, &mut i)
+        .ok_or_else(|| FileError::malformed("file time is shorter than a GINT5"))?;
     let name = read_gstring(payload, &mut i)
         .ok_or_else(|| FileError::malformed("file name length runs past the payload"))?;
-    let Some(size_at) = payload.get(i..i + 3) else {
-        return Err(FileError::malformed("file size is shorter than a GINT3"));
-    };
-    let Some(size) = read_gint3(size_at) else {
-        return Err(FileError::malformed("file size is shorter than a GINT3"));
-    };
-    i += 3;
-    if size > MAX_FILE_BYTES {
+    let mut rest = payload.get(i..).unwrap_or_default();
+    if let Some(body) = rest.strip_suffix(b"\n") {
+        rest = body;
+    }
+    if rest.len() > MAX_FILE_BYTES {
         return Err(FileError::TooLarge {
-            len: size,
+            len: rest.len(),
             max: MAX_FILE_BYTES,
         });
-    }
-    let rest = payload.get(i..).unwrap_or_default();
-    if rest.len() != size {
-        return Err(FileError::malformed(format!(
-            "file length {size} but {} bytes follow the size",
-            rest.len()
-        )));
     }
     Ok((text(&name), rest.to_vec()))
 }
@@ -295,6 +325,8 @@ pub fn parse_file_body(payload: &[u8]) -> Result<(String, Vec<u8>), FileError> {
 enum Step<T> {
     Done(T),
     Keep(Event),
+    /// The event belongs to this call. It is not put back on the queue.
+    Take,
     Stop(FileError),
 }
 
@@ -310,6 +342,7 @@ impl Session {
                 Ok(Some(ev)) => match step(ev) {
                     Step::Done(v) => break Ok(v),
                     Step::Stop(e) => break Err(e),
+                    Step::Take => {}
                     Step::Keep(ev) => held.push(ev),
                 },
                 Ok(None) => {
@@ -327,35 +360,42 @@ impl Session {
         result
     }
 
-    /// The names in `dir`, in the order the server sends them.
+    /// The file names in `dir`, in the order the server sends them.
     ///
-    /// `""` is the world root. Events that are not the list (the login
-    /// signature, chat, players) stay queued.
+    /// `""` sends an empty folder name. Events that are not the directory
+    /// (the login signature, chat, players) stay queued. The
+    /// `Folder changed to ` line is consumed here.
     pub fn list_dir(&mut self, dir: &str, timeout: Duration) -> Result<Vec<String>, FileError> {
         self.link.send(&[cd_message(dir)?])?;
         let deadline = Instant::now() + timeout;
         self.wait_until(deadline, |ev| match ev {
-            Event::Other(id, p) if id == plo::RC_FILEBROWSER_DIRLIST => match parse_dir_list(&p) {
+            Event::Other(id, p) if id == plo::RC_FILEBROWSER_DIR => match parse_dir(&p) {
                 Ok(names) => Step::Done(names),
                 Err(e) => Step::Stop(e),
             },
             Event::Other(id, p) if id == plo::RC_FILEBROWSER_MESSAGE => {
-                Step::Stop(FileError::Refused(text(&p)))
+                let msg = text(&p);
+                if msg.starts_with(FOLDER_CHANGED) {
+                    Step::Take
+                } else {
+                    Step::Stop(FileError::Refused(msg))
+                }
             }
             Event::Disconnect(why) => Step::Stop(FileError::Refused(why)),
             other => Step::Keep(other),
         })
     }
 
-    /// The bytes of `path`, whatever the server sent for that get.
+    /// The bytes of `path`.
     ///
-    /// The name carried beside the bytes is not compared with `path` (that
-    /// field is lab-unconfirmed). Other events stay queued.
+    /// The name beside the bytes is the file's own name, which on the
+    /// 2026-11-01 run was the last path segment, so it is not compared with
+    /// `path`. Other events stay queued.
     pub fn get_file(&mut self, path: &str, timeout: Duration) -> Result<Vec<u8>, FileError> {
         self.link.send(&[down_message(path)?])?;
         let deadline = Instant::now() + timeout;
         self.wait_until(deadline, |ev| match ev {
-            Event::Other(id, p) if id == plo::RC_FILEBROWSER_DIR => match parse_file_body(&p) {
+            Event::Other(id, p) if id == PLO_FILE => match parse_file_body(&p) {
                 Ok((_name, bytes)) => Step::Done(bytes),
                 Err(e) => Step::Stop(e),
             },
@@ -367,14 +407,30 @@ impl Session {
         })
     }
 
-    /// Send `data` as `path`. Returns once the frame is written.
+    /// Send `data` as `path`, and wait until the server answers.
     ///
-    /// A file over [`MAX_FILE_BYTES`] is refused and nothing is sent. The
-    /// server's copy is whatever it recorded from this frame; this call
-    /// does not wait for an ack.
-    pub fn put_file(&mut self, path: &str, data: &[u8]) -> Result<(), FileError> {
+    /// A file over [`MAX_FILE_BYTES`] is refused and nothing is sent. Id 67
+    /// beginning `Uploaded file ` is success. Any other id 67 is a refusal.
+    pub fn put_file(
+        &mut self,
+        path: &str,
+        data: &[u8],
+        timeout: Duration,
+    ) -> Result<(), FileError> {
         self.link.send_body(&upload_body(path, data)?)?;
-        Ok(())
+        let deadline = Instant::now() + timeout;
+        self.wait_until(deadline, |ev| match ev {
+            Event::Other(id, p) if id == plo::RC_FILEBROWSER_MESSAGE => {
+                let msg = text(&p);
+                if msg.starts_with(UPLOADED) {
+                    Step::Done(())
+                } else {
+                    Step::Stop(FileError::Refused(msg))
+                }
+            }
+            Event::Disconnect(why) => Step::Stop(FileError::Refused(why)),
+            other => Step::Keep(other),
+        })
     }
 }
 
@@ -383,71 +439,109 @@ mod tests {
     use seihai_core::protocol::split_messages;
 
     use super::*;
+    use crate::wire::push_gint5;
 
     #[test]
-    fn cd_and_down_bytes() {
-        assert_eq!(cd_message("levels").unwrap(), b"z&levels");
-        assert_eq!(cd_message("").unwrap(), b"z ");
-        assert_eq!(down_message("a.nw").unwrap(), b"|$a.nw");
+    fn cd_and_down_have_no_length_byte() {
+        assert_eq!(cd_message("levels").unwrap(), b"zlevels");
+        assert_eq!(cd_message("").unwrap(), b"z");
+        assert_eq!(cd_message("world/").unwrap(), b"zworld/");
+        assert_eq!(down_message("a.nw").unwrap(), b"|a.nw");
+        assert_eq!(
+            down_message("world/onlinestartlocal.nw").unwrap(),
+            b"|world/onlinestartlocal.nw"
+        );
     }
 
     #[test]
-    fn upload_bytes_keep_the_line_feed() {
-        // Id 50, GINT3(12), line feed, then id 93, GSTRING "a.nw",
-        // GINT3(3), "hi\n".
-        assert_eq!(
-            upload_body("a.nw", b"hi\n").unwrap(),
-            b"R  ,\n}$a.nw  #hi\n"
-        );
+    fn upload_bytes_are_the_file_after_the_name() {
+        // Id 50, GINT3(9), line feed, then id 93, GSTRING "a.nw", "hi\n".
+        // No GINT3 size in front of the file.
+        assert_eq!(upload_body("a.nw", b"hi\n").unwrap(), b"R  )\n}$a.nwhi\n");
     }
 
     #[test]
     fn inbound_file_with_a_line_feed_survives_split_messages() {
         let data = b"GLEVNW01\n\xff";
-        let mut inner = vec![gchar(plo::RC_FILEBROWSER_DIR)];
-        push_gstring(&mut inner, b"a.nw");
-        push_gint3(&mut inner, data.len());
-        inner.extend_from_slice(data);
-        let msgs = split_messages(&raw_block(PLO_RAWDATA, &inner));
+        let mut packet = vec![gchar(PLO_FILE)];
+        push_gint5(&mut packet, 0);
+        push_gstring(&mut packet, b"a.nw");
+        packet.extend_from_slice(data);
+        // The raw length counts one line feed after the packet.
+        let n = packet.len() + 1;
+        let mut body = vec![gchar(PLO_RAWDATA)];
+        push_gint3(&mut body, n);
+        body.push(b'\n');
+        body.extend_from_slice(&packet);
+        body.push(b'\n');
+        let msgs = split_messages(&body);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].id, plo::RC_FILEBROWSER_DIR);
+        assert_eq!(msgs[0].id, PLO_FILE);
         let (name, bytes) = parse_file_body(&msgs[0].payload).unwrap();
         assert_eq!(name, "a.nw");
         assert_eq!(bytes, data);
     }
 
     #[test]
-    fn dir_list_round_trip_and_empty() {
-        let mut p = vec![gchar(0), gchar(2)];
-        push_gstring(&mut p, b"a.nw");
-        push_gstring(&mut p, &[0xE9]);
-        assert_eq!(parse_dir_list(&p).unwrap(), ["a.nw", "é"]);
-        assert!(parse_dir_list(&[gchar(0), gchar(0)]).unwrap().is_empty());
+    fn lab_file_prefix_is_the_time_and_the_name_length() {
+        // 2026-11-01: six bytes, then `onlinestartlocal.nw`, then the level.
+        // 0x33 is GCHAR(19), and that name is 19 bytes.
+        let mut p = vec![0x26, 0x77, 0x3a, 0x62, 0x7e, 0x33];
+        p.extend_from_slice(b"onlinestartlocal.nw");
+        p.extend_from_slice(b"GLEVNW01\n");
+        p.push(b'\n');
+        let (name, bytes) = parse_file_body(&p).unwrap();
+        assert_eq!(name, "onlinestartlocal.nw");
+        assert_eq!(bytes, b"GLEVNW01\n");
+    }
+
+    #[test]
+    fn dir_lists_the_names_and_an_empty_folder() {
+        // Folder "a", one file "b", rights "r", size 0, time 0.
+        // Record is 14 bytes, so the entry is a space, '.', then the record.
+        let mut p = b"!a .!b!r".to_vec();
+        p.extend_from_slice(&[b' '; 10]);
+        assert_eq!(parse_dir(&p).unwrap(), ["b"]);
+        assert!(parse_dir(b"!a").unwrap().is_empty());
+
+        let mut two = Vec::new();
+        push_gstring(&mut two, b"levels");
+        for name in [b"a.nw".as_slice(), b"\xE9"] {
+            let mut rec = Vec::new();
+            push_gstring(&mut rec, name);
+            push_gstring(&mut rec, b"rw");
+            push_gint5(&mut rec, 3);
+            push_gint5(&mut rec, 1);
+            two.push(b' ');
+            two.push(gchar(rec.len() as u8));
+            two.extend_from_slice(&rec);
+        }
+        assert_eq!(parse_dir(&two).unwrap(), ["a.nw", "é"]);
     }
 
     #[test]
     fn malformed_lengths_are_errors() {
-        assert!(parse_dir_list(b"").is_err());
-        assert!(parse_dir_list(&[0x20]).is_err());
-        // Count 1, length byte 0x00 wraps to 224, and no name bytes follow.
+        assert!(parse_dir(b"").is_err());
+        // Folder length 10, five bytes follow.
         assert!(matches!(
-            parse_dir_list(&[0x20, 0x21, 0x00]),
+            parse_dir(&[gchar(10), b's', b'h', b'o', b'r', b't']),
             Err(FileError::Malformed(_))
         ));
-        // Count 2, one short name.
-        let mut p = vec![gchar(0), gchar(2)];
-        push_gstring(&mut p, b"only");
-        assert!(matches!(parse_dir_list(&p), Err(FileError::Malformed(_))));
+        // A space, then a record length that runs past the payload.
+        let mut p = b"!a".to_vec();
+        p.push(b' ');
+        p.push(gchar(10));
+        p.push(b'x');
+        assert!(matches!(parse_dir(&p), Err(FileError::Malformed(_))));
         assert!(parse_file_body(b"").is_err());
-        // Name "a", then only two of the three size bytes.
+        // Time is five bytes. Four bytes is not a file.
         assert!(matches!(
-            parse_file_body(&[gchar(1), b'a', 0x20, 0x20]),
+            parse_file_body(&[0x20, 0x20, 0x20, 0x20]),
             Err(FileError::Malformed(_))
         ));
-        // Size 5, two bytes follow.
-        let mut p = vec![gchar(1), b'a'];
-        push_gint3(&mut p, 5);
-        p.extend_from_slice(b"xy");
+        // Time, then a name length that runs past the payload.
+        let mut p = vec![0x20, 0x20, 0x20, 0x20, 0x20, gchar(4)];
+        p.extend_from_slice(b"ab");
         assert!(matches!(parse_file_body(&p), Err(FileError::Malformed(_))));
     }
 
@@ -458,14 +552,13 @@ mod tests {
             upload_body("a.nw", &big),
             Err(FileError::TooLarge { len, max }) if len == big.len() && max == MAX_FILE_BYTES
         ));
-        let mut p = vec![gchar(1), b'a'];
-        push_gint3(&mut p, MAX_FILE_BYTES + 1);
+        let mut p = vec![0x20, 0x20, 0x20, 0x20, 0x20];
+        push_gstring(&mut p, b"a");
+        p.extend_from_slice(&big);
         assert!(matches!(
             parse_file_body(&p),
             Err(FileError::TooLarge { len, .. }) if len == MAX_FILE_BYTES + 1
         ));
-        // The size is past the limit and the bytes are not even there.
-        // Still a size error, and it does not try to allocate `len`.
     }
 
     #[test]
@@ -475,14 +568,19 @@ mod tests {
             assert!(upload_body(bad, b"z").is_err(), "{bad}");
         }
         assert!(cd_message("../x").is_err());
+        assert!(cd_message("/world/").is_err());
+        assert!(cd_message("a//b").is_err());
         assert!(cd_message("").is_ok());
+        assert!(cd_message("world/").is_ok());
+        assert!(down_message("world/a.nw").is_ok());
     }
 
     #[test]
     fn empty_file_round_trip() {
         let mut p = Vec::new();
+        push_gint5(&mut p, 0);
         push_gstring(&mut p, b"a.nw");
-        push_gint3(&mut p, 0);
+        p.push(b'\n');
         let (name, bytes) = parse_file_body(&p).unwrap();
         assert_eq!(name, "a.nw");
         assert!(bytes.is_empty());

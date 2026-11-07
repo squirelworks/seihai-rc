@@ -105,11 +105,14 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
 (`remotecontrol-lineage.md`).
 
 - [x] File link: list, get, put (`Session::list_dir`, `get_file`, `put_file`).
-      No window and no `files` command line in this slice. A loopback run
-      against the fork on 2026-11-01 did not match these widths; the client
-      still sends them. See `docs/PROTOCOL.md` and
-      `docs/lab/2026-11-01-file-widths.md`. Evidence for the bytes we send:
-      `tests/file_link.rs`. No real client.
+      No window and no `files` command line in this slice. List and get send
+      the path as the rest of the line. The directory is id 66. A file arrives
+      as id 102 (time, name, bytes) inside id 100. A put is a `GSTRING` name
+      and the bytes, inside id 50, and waits for id 67 `Uploaded file`.
+      Widths from the 2026-11-01 loopback run
+      (`docs/lab/2026-11-01-file-widths.md`, `docs/PROTOCOL.md`). Evidence:
+      `tests/file_link.rs`, and one loopback run against the lab fork
+      (`docs/lab/2026-11-07-file-wire.md`). No real client.
 - [ ] Server options, folder config, flags, move / delete / rename, folder
       delete (160), large-file packets (155/156).
 

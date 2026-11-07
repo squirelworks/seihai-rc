@@ -1,7 +1,7 @@
 //! List, get and put against a fake gserver on an ephemeral loopback port.
 //!
-//! The fake follows the layout in `docs/PROTOCOL.md` (payload fields there
-//! are still a lab check). It does not use the crate's builders: it writes
+//! The fake speaks the layout from the 2026-11-01 loopback run
+//! (`docs/PROTOCOL.md`). It does not use the crate's builders: it writes
 //! the bytes itself, and it reads a put back itself.
 
 use std::io::{Read, Write};
@@ -9,11 +9,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use seihai_core::protocol::{read_gint3, split_messages, zlib_decompress, Message};
+use seihai_core::protocol::{read_gint3, zlib_decompress};
 use seihai_rc::files::{FileError, MAX_FILE_BYTES};
 use seihai_rc::link::Codec;
 use seihai_rc::rc::{Event, LoginParams, RcKind, Session};
-use seihai_rc::wire::{gchar, message, push_gstring, read_gstring, text};
+use seihai_rc::wire::{gchar, message, push_gint5, push_gstring, read_gstring, text};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const LEVEL: &[u8] = b"GLEVNW01\nBOARD \xff\n";
@@ -44,33 +44,49 @@ fn with_nl(mut msg: Vec<u8>) -> Vec<u8> {
     msg
 }
 
-/// Id 65, GSHORT count, GSTRING names. Count 2 with one name is the bad case.
-fn dir_list_body(names: &[&str]) -> Vec<u8> {
-    let n = names.len() as u16;
-    let mut p = vec![gchar((n >> 7) as u8), gchar((n & 0x7F) as u8)];
+/// Id 67, then id 66: GSTRING folder, then each file as a space, a GCHAR
+/// length, a GSTRING name, a GSTRING rights, a GINT5 size and a GINT5 time.
+fn dir_reply(folder: &str, names: &[&str]) -> Vec<u8> {
+    let mut notice = with_nl(message(
+        67,
+        format!("Folder changed to {folder}").as_bytes(),
+    ));
+    let mut p = Vec::new();
+    push_gstring(&mut p, folder.as_bytes());
     for name in names {
-        push_gstring(&mut p, name.as_bytes());
+        let mut rec = Vec::new();
+        push_gstring(&mut rec, name.as_bytes());
+        push_gstring(&mut rec, b"rw");
+        push_gint5(&mut rec, 0);
+        push_gint5(&mut rec, 0);
+        p.push(b' ');
+        p.push(gchar(rec.len() as u8));
+        p.extend_from_slice(&rec);
     }
-    with_nl(message(65, &p))
+    notice.extend(with_nl(message(66, &p)));
+    notice
 }
 
 fn malformed_list_body() -> Vec<u8> {
-    // Count says 2. The only name says it is 10 bytes long and 5 follow.
-    let mut p = vec![gchar(0), gchar(2), gchar(10)];
+    // Folder length 10, and only five bytes follow.
+    let mut p = vec![gchar(10)];
     p.extend_from_slice(b"short");
-    with_nl(message(65, &p))
+    with_nl(message(66, &p))
 }
 
-/// Id 100 raw block, inner id 66, GSTRING name, GINT3 size, bytes.
+/// Id 100 raw block. Inside: id 102, GINT5 time, GSTRING name, bytes, and
+/// the line feed the raw length counts.
 fn file_reply(name: &str, data: &[u8]) -> Vec<u8> {
-    let mut inner = vec![gchar(66)];
-    push_gstring(&mut inner, name.as_bytes());
-    inner.extend_from_slice(&gint3(data.len()));
-    inner.extend_from_slice(data);
+    let mut packet = vec![gchar(102)];
+    push_gint5(&mut packet, 0);
+    push_gstring(&mut packet, name.as_bytes());
+    packet.extend_from_slice(data);
+    let n = packet.len() + 1;
     let mut body = vec![gchar(100)];
-    body.extend_from_slice(&gint3(inner.len()));
+    body.extend_from_slice(&gint3(n));
     body.push(b'\n');
-    body.extend_from_slice(&inner);
+    body.extend_from_slice(&packet);
+    body.push(b'\n');
     body
 }
 
@@ -84,36 +100,11 @@ struct Seen {
     puts: Vec<(String, Vec<u8>)>,
 }
 
-/// One sent `GSTRING`: a single length byte, then that many bytes, and
-/// nothing after. A `GSHORT` length would be two bytes and fail this.
-fn one_gstring(payload: &[u8]) -> String {
-    assert!(!payload.is_empty(), "a GSTRING length is one byte");
-    let n = usize::from(payload[0].wrapping_sub(0x20));
-    assert!(n <= 223, "GSTRING length is a GCHAR, got {n}");
-    assert_eq!(
-        payload.len(),
-        1 + n,
-        "sent path is one GSTRING (1 length byte + {n} bytes), not a longer count"
-    );
-    let mut i = 0;
-    let raw = read_gstring(payload, &mut i).unwrap();
-    assert_eq!(i, payload.len());
-    text(&raw)
-}
-
 fn take_put(payload: &[u8]) -> (String, Vec<u8>) {
     assert!(!payload.is_empty(), "put name length is one byte");
     let mut i = 0;
     let name = read_gstring(payload, &mut i).expect("put name is a GSTRING");
     assert_eq!(i, 1 + name.len(), "name length is one byte, not a GSHORT");
-    assert!(
-        payload.len() >= i + 3,
-        "put size is a GINT3 (three bytes), got {} after the name",
-        payload.len().saturating_sub(i)
-    );
-    let size = read_gint3(&payload[i..i + 3]).unwrap();
-    i += 3;
-    assert_eq!(payload.len(), i + size, "put size does not match");
     (text(&name), payload[i..].to_vec())
 }
 
@@ -130,24 +121,26 @@ fn split_client_raw(body: &[u8]) -> (u8, Vec<u8>) {
     (inner[0].wrapping_sub(0x20), inner[1..].to_vec())
 }
 
-fn reply(m: &Message, seen: &mut Seen) -> Option<Vec<u8>> {
+fn reply(m: &seihai_core::protocol::Message, seen: &mut Seen) -> Option<Vec<u8>> {
     match m.id {
         90 => {
-            let dir = one_gstring(&m.payload);
+            // The payload is the folder. A length byte would make `levels`
+            // into `&levels` and this match would miss.
+            let dir = text(&m.payload);
             seen.lists.push(dir.clone());
             Some(match dir.as_str() {
-                "" => dir_list_body(&["levels"]),
-                "levels" => dir_list_body(&["a.nw", "b.nw"]),
+                "" => dir_reply("", &["levels"]),
+                "levels" => dir_reply("levels", &["a.nw", "b.nw"]),
                 "bad" => malformed_list_body(),
                 _ => text_reply(b"no such directory"),
             })
         }
         92 => {
-            let path = one_gstring(&m.payload);
+            let path = text(&m.payload);
             seen.gets.push(path.clone());
             Some(match path.as_str() {
-                "levels/a.nw" => file_reply("levels/a.nw", LEVEL),
-                "levels/empty.nw" => file_reply("levels/empty.nw", b""),
+                "levels/a.nw" => file_reply("a.nw", LEVEL),
+                "levels/empty.nw" => file_reply("empty.nw", b""),
                 "huge.bin" => file_reply("huge.bin", &vec![0xAB; MAX_FILE_BYTES + 1]),
                 _ => text_reply(b"no such file"),
             })
@@ -179,10 +172,17 @@ fn fake_file_server() -> (String, JoinHandle<Seen>) {
             if body.first().map(|b| b.wrapping_sub(0x20)) == Some(50) {
                 let (id, payload) = split_client_raw(&body);
                 assert_eq!(id, 93);
-                seen.puts.push(take_put(&payload));
+                let put = take_put(&payload);
+                let ack = format!("Uploaded file {}", put.0);
+                if put.0 == "levels/nope.nw" {
+                    send_body(&mut stream, &mut codec, &text_reply(b"not stored"));
+                } else {
+                    send_body(&mut stream, &mut codec, &text_reply(ack.as_bytes()));
+                }
+                seen.puts.push(put);
                 continue;
             }
-            for m in split_messages(&body) {
+            for m in seihai_core::protocol::split_messages(&body) {
                 if let Some(out) = reply(&m, &mut seen) {
                     send_body(&mut stream, &mut codec, &out);
                 }
@@ -215,7 +215,7 @@ fn run_happy_path(kind: RcKind) {
     assert_eq!(session.get_file("levels/a.nw", TIMEOUT).unwrap(), LEVEL);
     assert_eq!(session.get_file("levels/empty.nw", TIMEOUT).unwrap(), b"");
     let put = b"replaced\nlevel\0";
-    session.put_file("levels/a.nw", put).unwrap();
+    session.put_file("levels/a.nw", put, TIMEOUT).unwrap();
     assert_eq!(
         session.next_event(Instant::now()).unwrap(),
         Some(Event::Signature)
@@ -245,6 +245,10 @@ fn malformed_lengths_and_too_large_file_do_not_panic() {
         session.list_dir("bad", TIMEOUT),
         Err(FileError::Malformed(_))
     ));
+    match session.list_dir("missing", TIMEOUT) {
+        Err(FileError::Refused(why)) => assert_eq!(why, "no such directory"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
     match session.get_file("missing.nw", TIMEOUT) {
         Err(FileError::Refused(why)) => assert_eq!(why, "no such file"),
         other => panic!("expected a refusal, got {other:?}"),
@@ -257,15 +261,23 @@ fn malformed_lengths_and_too_large_file_do_not_panic() {
         other => panic!("expected too large, got {other:?}"),
     }
     let big = vec![1u8; MAX_FILE_BYTES + 1];
-    match session.put_file("levels/big.nw", &big) {
+    match session.put_file("levels/big.nw", &big, TIMEOUT) {
         Err(FileError::TooLarge { len, max }) => {
             assert_eq!(len, big.len());
             assert_eq!(max, MAX_FILE_BYTES);
         }
         other => panic!("expected too large, got {other:?}"),
     }
+    match session.put_file("levels/nope.nw", b"x", TIMEOUT) {
+        Err(FileError::Refused(why)) => assert_eq!(why, "not stored"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
     session.close();
     let seen = handle.join().unwrap();
-    assert!(seen.puts.is_empty(), "a refused put must not be sent");
+    assert_eq!(
+        seen.puts,
+        [("levels/nope.nw".into(), b"x".to_vec())],
+        "a refused put of a too-large file must not be sent"
+    );
     assert_eq!(seen.gets, ["missing.nw", "huge.bin"]);
 }

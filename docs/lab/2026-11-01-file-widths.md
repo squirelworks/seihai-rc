@@ -37,10 +37,15 @@ match.
   `probe` and a line feed. The fork then sent id 67, `Uploaded file
   rc-probe.txt`. `put_file` does not wait for that.
 
-The client still sends the widths in `docs/PROTOCOL.md`.
-`tests/file_link.rs` asserts them on the bytes the fake reads: one length
-byte for a path, one length byte for a put name, three bytes for a put
-size.
+At the time of this run the client still sent a length byte on list and
+get, and three size bytes on put.
+
+Follow-up: the client now sends the folder and the get path as the rest of
+the line, reads id 66 as the directory and id 102 as the file, and puts the
+file bytes straight after the name. The six bytes before
+`onlinestartlocal.nw` are a GINT5 modification time and the name length
+(`0x33` is 19, the length of that name). See `docs/PROTOCOL.md`. A later
+loopback run of that client is `docs/lab/2026-11-07-file-wire.md`.
 
 Logs: the probe's stdout, kept outside this repo, and the fork's RC log
 on the lab copy. No pcap. The probe program was not committed.

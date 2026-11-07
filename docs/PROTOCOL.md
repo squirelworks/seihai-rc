@@ -293,48 +293,43 @@ Still needs a lab check, and so is not turned into fields:
 
 ## File link (list, get, put)
 
-Ids are the file-browser ids named under stage 4 in `docs/NEXT.md`. This
-repo does not describe their payloads. The layout below is the smallest one
-that fits the codec already in this crate: `GSTRING` for a path or a name,
-`GSHORT` for a count, `GINT3` for a byte count, and a raw block so the file
-bytes may contain `\n`.
+Ids are the file-browser ids named under stage 4 in `docs/NEXT.md`. The
+layout is what the gserver-v2 fork did with list, get and put on the
+loopback run of 2026-11-01 (`docs/lab/2026-11-01-file-widths.md`).
 
 A raw block is the shape `split_messages` already uses for id 100: `GCHAR`
 id, `GINT3` byte count, `\n`, then that many bytes (the next message, id
-included, line feeds allowed). Inbound files use id 100, so `Link::recv`
-keeps them intact. Outbound files use id 50, the outbound raw id named in
-the NPC-Control section above. `split_messages` does not treat id 50 as
-raw; the sender builds the block itself.
+included, line feeds allowed). The fork wraps an outbound file the same
+way with id 50, so a level's line feeds stay inside the put. `split_messages`
+does not treat id 50 as raw; the sender builds the block itself. Inbound,
+id 100 is unwrapped before this client sees the message, so a file arrives
+as id 102.
 
-A loopback run against the gserver-v2 fork on 2026-11-01 (`docs/lab/2026-11-01-file-widths.md`)
-did not match this layout. The client still sends the widths below. What
-the fork did with those bytes:
+On that run, a length byte in front of the folder made id 90 match nothing,
+so the fork sent no reply. A length byte in front of the get path was logged
+as the first character of the path. The reply was id 102. Its payload began
+`26 77 3a 62 7e 33` and then `onlinestartlocal.nw` (19 bytes) and then the
+level, the same length as the file. Those six bytes are a `GINT5`
+modification time and the name's length: `0x33` is 19. There is no `GINT3`
+size. A put whose name was a `GSTRING` was stored with the three size bytes
+still in front of the file, and the fork answered id 67, `Uploaded file rc-probe.txt`.
 
-- Id 90 (`""` and `world`) got no reply.
-- Id 92's path was logged with the length byte as the first character of
-  the path (`9` in front of a 25-byte path). The reply was id 102, not id
-  66 inside id 100: 6 bytes, then the name `onlinestartlocal.nw` with no
-  length byte, then the level bytes. No GINT3 size.
-- Id 93's name was taken (the log names `rc-probe.txt`). The stored file
-  began with the three GINT3 size bytes and then the file. The reply was
-  id 67, `Uploaded file rc-probe.txt`.
-
-Do not treat the table as what that fork sends.
-
-| | Id | Payload, lab-unconfirmed |
+| | Id | Payload |
 |---|---:|---|
-| List | 90 `RC_FILEBROWSER_CD` | `GSTRING` path. `""` is the world root. Id 89 `START` is not sent. |
-| Names | 65 `RC_FILEBROWSER_DIRLIST` | `GSHORT` count, then that many `GSTRING` names. No size, no directory flag. |
-| Get | 92 `RC_FILEBROWSER_DOWN` | `GSTRING` path. |
-| File | 100 raw, then 66 `RC_FILEBROWSER_DIR` | `GSTRING` name, `GINT3` size, then that many bytes. |
-| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | same name, `GINT3` size, and bytes as the file row. |
-| Refusal | 67 `RC_FILEBROWSER_MESSAGE` | the text. |
+| List | 90 `RC_FILEBROWSER_CD` | The folder, the rest of the line. No length byte. `""` is an empty payload. The fork answers when the text is a folder the account may open; a right such as `world/*` is stored as `world/`. |
+| Directory | 66 `RC_FILEBROWSER_DIR` | `GSTRING` folder, then one record per file: a space, a `GCHAR` length, a `GSTRING` name, a `GSTRING` rights text, a `GINT5` size, a `GINT5` modification time. |
+| Folder line | 67 `RC_FILEBROWSER_MESSAGE` | `Folder changed to ` and the folder, before id 66. Any other id 67 is a refusal. |
+| Get | 92 `RC_FILEBROWSER_DOWN` | The path, the rest of the line. No length byte. The fork joins it to the folder from the last list. |
+| File | 100 raw, then 102 `PLO_FILE` | `GINT5` modification time, `GCHAR` name length, the name, the file bytes. The raw length counts one line feed after the file; that byte is not part of the file. |
+| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. |
+| Stored | 67 `RC_FILEBROWSER_MESSAGE` | `Uploaded file ` and the name. Any other id 67 is a refusal. |
 
-Not sent, layouts unknown: 89 `START`, 91 `END`, 96 move, 97 delete, 98
-rename, 155/156 large file, 160 folder delete. A file longer than 60 KiB
-is refused. One frame's length is a `u16`, and those large-file ids are
-how a bigger file would have to travel once a lab run shows their layout.
+Id 65 `RC_FILEBROWSER_DIRLIST` is the reply to id 89 `START`, which this
+client does not send. Not sent, layouts unknown: 91 `END`, 96 move, 97
+delete, 98 rename, 155/156 large file, 160 folder delete. A file longer
+than 60 KiB is refused. One frame's length is a `u16`, and those large-file
+ids are how a bigger file would travel once a lab run shows their layout.
 
 Paths are relative, `/`-separated. `..`, a leading `/`, a backslash and a
-colon are refused. A `GSTRING` holds at most 223 bytes, so a longer path
-is refused rather than cut.
+colon are refused. A trailing `/` is kept. A path longer than 223 bytes is
+refused: a put name is one `GCHAR`, which cannot say more.
