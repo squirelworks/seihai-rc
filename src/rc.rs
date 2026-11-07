@@ -501,13 +501,19 @@ impl Session {
     /// the deadline passed or the server closed the link (see
     /// [`Self::is_closed`]).
     ///
-    /// Wakes early to send the empty 162 keepalive.
+    /// Wakes early to send the empty 162 keepalive. A keepalive write
+    /// that finds the peer already gone is that close, not an error.
     pub fn next_event(&mut self, deadline: Instant) -> io::Result<Option<Event>> {
         loop {
             if !self.pending.is_empty() {
                 return Ok(Some(self.pending.remove(0)));
             }
-            self.send_keepalive_if_due()?;
+            if let Err(e) = self.send_keepalive_if_due() {
+                if self.link.is_closed() {
+                    return Ok(None);
+                }
+                return Err(e);
+            }
             if self.link.is_closed() || Instant::now() >= deadline {
                 return Ok(None);
             }
