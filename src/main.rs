@@ -356,6 +356,13 @@ fn player_line(tag: &str, e: &PlayerEntry) -> String {
     )
 }
 
+fn hex_bytes(raw: &[u8]) -> String {
+    raw.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn print_event(ev: &Event, verbose: bool) {
     match ev {
         Event::Signature => {}
@@ -369,6 +376,7 @@ fn print_event(ev: &Event, verbose: bool) {
         Event::NpcServerAddr(addr) => {
             println!("[npc-server] {} {}", addr.player_id, addr.raw);
         }
+        Event::PlayerFlags(raw) => println!("[player-flags] {}", hex_bytes(raw)),
         Event::Other(id, p) if verbose => eprintln!("[id {id}] {} bytes", p.len()),
         Event::Other(..) => {}
     }

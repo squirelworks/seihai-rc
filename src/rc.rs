@@ -50,6 +50,25 @@ pub const PLO_DELPLAYER: u8 = 56;
 pub const PLO_RC_CHAT: u8 = 74;
 /// Server to client: the NPC-server address for one player.
 pub const PLO_NPCSERVERADDR: u8 = 79;
+/// Server to RC 124. Inferred name: RC3 logs that player flags arrived.
+/// Unknown layout: it reads nothing. No game client handles it.
+pub const PLO_RC_PLAYERFLAGS: u8 = 124;
+/// Client to server 162. Confirmed layout: empty on an RC (a keepalive,
+/// once a minute). Game clients use the same id to answer server 108,
+/// with a `!` and a GSHORT. Inferred that the empty form is a ping.
+///
+/// The NPC-Control socket does not get one. On that socket 162 is the
+/// server's class script, and the RC3 notes show the empty 162 on the RC
+/// connection's timer only.
+pub const PLI_PING: u8 = 162;
+
+/// How often an RC sends [`PLI_PING`].
+pub const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
+
+/// The keepalive: id 162 and no payload. The link adds the line feed.
+pub fn ping_message() -> Vec<u8> {
+    message(PLI_PING, b"")
+}
 
 /// Player prop ids carried in `ADDPLAYER`.
 pub const PROP_NICKNAME: u8 = 0;
@@ -265,6 +284,8 @@ pub enum Event {
     DelPlayer(u16),
     /// Id 79: where an NPC-server player is listening.
     NpcServerAddr(NpcServerAddr),
+    /// Id 124. The payload is not parsed; the bytes are what arrived.
+    PlayerFlags(Vec<u8>),
     /// Anything else (id, payload).
     Other(u8, Vec<u8>),
 }
@@ -293,6 +314,7 @@ pub fn parse_event(m: &Message) -> Event {
             Some(addr) => Event::NpcServerAddr(addr),
             None => Event::Other(m.id, p.clone()),
         },
+        PLO_RC_PLAYERFLAGS => Event::PlayerFlags(p.clone()),
         id => Event::Other(id, p.clone()),
     }
 }
@@ -404,6 +426,10 @@ pub struct Session {
     /// Events read during login that the caller has not taken yet.
     pub(crate) pending: Vec<Event>,
     pub players: PlayerList,
+    /// How long between empty 162 keepalives.
+    keepalive_every: Duration,
+    /// When the next keepalive is due.
+    next_keepalive: Instant,
 }
 
 impl Session {
@@ -424,6 +450,8 @@ impl Session {
             link,
             pending: Vec::new(),
             players: PlayerList::default(),
+            keepalive_every: KEEPALIVE_EVERY,
+            next_keepalive: Instant::now() + KEEPALIVE_EVERY,
         };
         loop {
             let Some(msgs) = s.link.recv(deadline)? else {
@@ -452,19 +480,46 @@ impl Session {
         Ok(s)
     }
 
+    /// How often to send the empty 162. The default is 60 s. A test passes
+    /// a short interval.
+    pub fn set_keepalive_every(&mut self, every: Duration) {
+        self.keepalive_every = every;
+        self.next_keepalive = Instant::now() + every;
+    }
+
+    /// Send the keepalive when it is due.
+    fn send_keepalive_if_due(&mut self) -> io::Result<()> {
+        if Instant::now() < self.next_keepalive {
+            return Ok(());
+        }
+        self.link.send(&[ping_message()])?;
+        self.next_keepalive = Instant::now() + self.keepalive_every;
+        Ok(())
+    }
+
     /// The next event, waiting at most until `deadline`. `Ok(None)` when
     /// the deadline passed or the server closed the link (see
     /// [`Self::is_closed`]).
+    ///
+    /// Wakes early to send the empty 162 keepalive.
     pub fn next_event(&mut self, deadline: Instant) -> io::Result<Option<Event>> {
         loop {
             if !self.pending.is_empty() {
                 return Ok(Some(self.pending.remove(0)));
             }
-            let Some(msgs) = self.link.recv(deadline)? else {
+            self.send_keepalive_if_due()?;
+            if self.link.is_closed() || Instant::now() >= deadline {
                 return Ok(None);
-            };
-            for m in &msgs {
-                self.pending.push(self.players.observe(parse_event(m)));
+            }
+            let wake = deadline.min(self.next_keepalive);
+            match self.link.recv(wake)? {
+                Some(msgs) => {
+                    for m in &msgs {
+                        self.pending.push(self.players.observe(parse_event(m)));
+                    }
+                }
+                None if self.link.is_closed() || Instant::now() >= deadline => return Ok(None),
+                None => {}
             }
         }
     }
@@ -691,6 +746,18 @@ mod tests {
         let mut p = vec![0x20 + 1, 0x20 + 2]; // (1 << 7) | 2 = 130
         push_gstring(&mut p, b"a");
         assert_eq!(parse_addplayer(&p).unwrap().id, 130);
+    }
+
+    #[test]
+    fn ping_message_is_an_empty_162_and_124_is_not_parsed() {
+        assert_eq!(PLI_PING, 162);
+        assert_eq!(ping_message(), vec![gchar(PLI_PING)]);
+        assert_eq!(PLO_RC_PLAYERFLAGS, 124);
+        let ev = parse_event(&seihai_core::protocol::Message {
+            id: PLO_RC_PLAYERFLAGS,
+            payload: vec![0x10, 0x21],
+        });
+        assert_eq!(ev, Event::PlayerFlags(vec![0x10, 0x21]));
     }
 
     #[test]
