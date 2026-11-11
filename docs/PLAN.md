@@ -22,13 +22,17 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
 
 1. **Done (command line, 2026-10-31).** Connect (listserver RC list or direct
    host and port), log in, show server messages and the RC chat, list players.
-2. Players: list, private message, message all, warp, disconnect, edit props and
-   rights, local ban.
-3. Accounts: list with a filter, add, edit, delete.
+2. **Mostly done (command line, 2026-11-04).** Players: list, private message,
+   message all, warp, disconnect, edit props and rights, local ban. List RCs
+   (65) and more prop names are still open.
+3. **Mostly done (command line, 2026-11-04).** Accounts: list with a filter,
+   add, edit, delete. The byte before the ban reason in 73 is still open.
 4. Server options, folder config, server flags, file browser with upload and
-   download.
-5. NPC Control: NPC list, edit script, add/delete NPC, classes, weapons, levels.
-   Login and plain-zlib framing are in (`seihai-rc nc login`). Lists are not.
+   download. The file link (list, get, put) is in as a library API; the rest
+   is not started.
+5. **Mostly done (command line, 2026-11-01).** NPC Control: NPC list, edit
+   script, add/delete NPC, classes, weapons, levels. Login, discovery and
+   NPC, class and weapon list / get / set / delete are in. Levels are not.
 
 Each feature: a command-line form first (`seihai-rc players list --server ...`),
 tested in CI against `seihai-gserver` and in the lab against the fork, then the

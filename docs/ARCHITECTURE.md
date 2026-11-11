@@ -47,8 +47,8 @@ needed for one link; do not add tokio unless a feature needs many links.
 | Feature (PLAN.md) | Code | Command line |
 |---|---|---|
 | 2. Players: PM, message all, warp, disconnect, props, rights, ban | `src/players.rs` (builders + parsers), events in `rc::Event` | `seihai-rc players pm/warp/kick/props/rights/ban` |
-| 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/add/edit/del` |
-| 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc options get/set`, `seihai-rc files ls/get/put` |
+| 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/get/set/add/delete` |
+| 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc options get/set`, `seihai-rc files ls/get/put` (planned; the file link is a library API so far) |
 | 5. NPC Control | `src/nc.rs` for the type-3 socket; discovery (ids 94 and 79) in `src/rc.rs` | `seihai-rc nc discover`, `nc npcs`, `nc npc`, `nc classes`, `nc class`, `nc weapons`, `nc weapon` |
 | Window | `src/ui/` behind a `gui` cargo feature, so the CLI builds without egui | `seihai-rc gui` |
 

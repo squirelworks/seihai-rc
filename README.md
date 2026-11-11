@@ -8,10 +8,13 @@ Part of the Seihai server stack:
 [seihai-listserver](https://github.com/squirelworks/seihai-listserver) ·
 [seihai-rc](https://github.com/squirelworks/seihai-rc) ·
 [seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) (GPL fork of GServer-v2, ships first) ·
+[seihai-gs2lib](https://github.com/squirelworks/seihai-gs2lib) (GPL fork of gs2lib) ·
+[seihai-servertools](https://github.com/squirelworks/seihai-servertools) ·
 client: [seihai](https://github.com/squirelworks/seihai).
 
 **Status: command line.** Log in directly or through the listserver's RC
-list, watch the RC chat, list the players online, and send a private
+list, watch the RC chat (an empty keepalive, id 162, goes out once a minute
+so a quiet session is not dropped), list the players online, and send a private
 message, an admin message to everyone or to one player, a disconnect or
 a warp (`players pm/say/admin-pm/kick/warp`),
 and read or set an account's comments, ban and rights (`players comments/ban/rights`), and read or set a player's or an account's props (`players props`).
@@ -87,7 +90,10 @@ cargo test
 The tests run the client against small fake servers on loopback. Lab runs
 against the gserver-v2 fork are recorded in [docs/lab](docs/lab).
 
-Releases for Linux, Windows and macOS are built by GitHub Actions on each `v*` tag.
+Releases for Linux, Windows and macOS are built by GitHub Actions on each `v*`
+tag (or by hand from the Release workflow) as a draft that the owner publishes.
+The notes come from `docs/releases/v<version>.md`, written in a PR first; none
+has been released yet.
 
 ## Licence
 

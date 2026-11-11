@@ -1,6 +1,6 @@
 # Next steps
 
-Stage 1 (login, RC list, player list, RC chat) is merged. Work in this order,
+Stage 1 and most of stages 2, 3 and 5 are merged; the boxes below say what is left. Work in this order,
 one branch and pull request each. Ids below are packet ids (facts). Payload
 layouts marked **check** must be confirmed in the lab against the fork before
 they are relied on; write what you see into `docs/PROTOCOL.md`.
@@ -13,6 +13,10 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
       Evidence: fake gserver in `tests/fake_servers.rs`. No real client. The
       fork was not re-run (lab pack not available). The resend was seen on
       2026-10-31 (`docs/lab/2026-10-31-stage1.md`).
+- [x] RC keepalive: an empty id 162 every 60 s on the game-server RC link
+      (not on the NPC-Control socket), and id 124 printed as raw hex, layout
+      unknown. Evidence: `tests/keepalive.rs`. No real client was run
+      (PR #21, issue #19).
 - [ ] Read `PLO_OTHERPLPROPS` (8) for RCs if the fork sends it on nickname or
       level changes (**check**), and update `PlayerList`.
 - [ ] `--nick` default: real RCs always send a nickname; decide whether to send
