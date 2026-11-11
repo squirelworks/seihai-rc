@@ -84,7 +84,9 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 - [ ] Props set: more names than max-hearts, hearts, gralats, arrows,
       bombs, glove and ap; flags and weapons as options; chests once a
       non-zero count is captured.
-- [ ] Fork: send the stored flags in 72, so a props set keeps them.
+- [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
+      seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
+      with a real 2.22 RC). `seihai-rc` has not been re-run against it.
 - [ ] List RCs (65). The 2.22 RC (`GSERV024`) sends it from no window, so
       it needs a newer RC or another source.
 
@@ -97,7 +99,9 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       byte test from the capture and a case in `tests/fake_servers.rs`.
 - [ ] The byte before the ban reason in 73 (most likely the ban time).
       Only 0x20 has been seen; a 73 with another value is not read.
-- [ ] Fork: keep load only, admin level and admin worlds from 78 and 70.
+- [x] Fork: keep load only, admin level and admin worlds from 78 and 70.
+      Done in seihai-gserver-v2 (`CHANGES-SEIHAI.md`). `seihai-rc` has not
+      been re-run against it.
 
 ## Stage 4: server
 

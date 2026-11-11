@@ -182,11 +182,14 @@ Both captured 76s carry the same props, in this order: 1 to 11, 13, 15,
 way from the 72 it just read, with the user's changes, and from the
 captured 72 it rebuilds the captured 76 byte for byte.
 
-The fork's 72 always has a flag count of 0, even for an account with
-flags stored, and a 76 replaces the stored flags with the ones it
-carries. So any props set through the fork, the real RC's included, drops
-the account's flags. `players props --set` says so when the reply had no
-flags.
+A 76 replaces the stored flags with the ones it carries. Until
+2026-11-04 the fork's 72 always had a flag count of 0, because it dropped
+every flag when it loaded an account, so any props set through it, the
+real RC's included, dropped the account's flags. The fork now keeps them
+and its 72 carries them (seihai-gserver-v2 `CHANGES-SEIHAI.md`, checked
+there with a real 2.22 RC); `seihai-rc` has not been re-run against that
+fork. `players props --set` still warns when a reply has no flags, since
+any server that stores flags it does not send would drop them.
 
 The reason in 64 is read as tokenized text. The fork at `f585ca6` stopped
 answering after a ban set on an online player (seen once); at `1d7843a` it
@@ -210,8 +213,10 @@ with `seihai-rc`: `docs/lab/2026-11-04-rc-accounts.md`.
 The RC's dialog has a ban time, but the RC sent none, even with one
 typed in. `seihai-rc` sends none either. The fork answers a get or list
 sent right after an add or delete with what it had before, so those two
-commands wait `--settle` ms before reading back. The fork does not keep
-load only, admin level or admin worlds from 78 or 70.
+commands wait `--settle` ms before reading back. The fork used to drop
+load only, admin level and admin worlds from 78 and 70; it now keeps them
+(seihai-gserver-v2 `CHANGES-SEIHAI.md`). `seihai-rc` has not been re-run
+against that fork.
 
 ## NPC Control
 
