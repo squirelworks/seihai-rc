@@ -24,6 +24,8 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 - [ ] `players list --json` for scripts.
 - [ ] Optional identity string after the password in the type-6 login (the fork
       reads it if present; old RCs send none).
+- [x] Upstream gs2lib packet names: `PLI_PONG` (162, was `PLI_PING`) and
+      `PLO_RC_UNKNOWN124` (124, was `PLO_RC_PLAYERFLAGS`). Names only.
 - [x] RC list over the secure handshake (`--secure-login --server-key`).
       C1 is id 5 plus `SEI00001` and the RC token, C2 seals the id 1
       payload, and the reply is the same id 5 list. The player-list form
