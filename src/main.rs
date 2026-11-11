@@ -941,8 +941,7 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
     if r.flags.is_empty() {
         eprintln!(
             "note: the server sent no flags, so none go back; a server that stores flags it \
-             does not send (the gserver-v2 fork does) drops them on this set, as it does for \
-             the real RC"
+             does not send drops them on this set, as it does for the real RC"
         );
     }
     s.send_messages(&[msg]).map_err(|e| e.to_string())?;
