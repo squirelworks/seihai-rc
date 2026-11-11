@@ -51,23 +51,25 @@ pub const PLO_RC_CHAT: u8 = 74;
 /// Server to client: the NPC-server address for one player.
 pub const PLO_NPCSERVERADDR: u8 = 79;
 /// Server to RC 124. Inferred name: RC3 logs that player flags arrived.
-/// Unknown layout: it reads nothing. No game client handles it.
-pub const PLO_RC_PLAYERFLAGS: u8 = 124;
+/// Unknown layout: it reads nothing. No game client handles it. Upstream
+/// gs2lib's name; we called it `PLO_RC_PLAYERFLAGS` until 2026-11-11.
+pub const PLO_RC_UNKNOWN124: u8 = 124;
 /// Client to server 162. Confirmed layout: empty on an RC (a keepalive,
 /// once a minute). Game clients use the same id to answer server 108,
 /// with a `!` and a GSHORT. Inferred that the empty form is a ping.
 ///
 /// The NPC-Control socket does not get one. On that socket 162 is the
 /// server's class script, and the RC3 notes show the empty 162 on the RC
-/// connection's timer only.
-pub const PLI_PING: u8 = 162;
+/// connection's timer only. Upstream gs2lib's name; we called it
+/// `PLI_PING` until 2026-11-11.
+pub const PLI_PONG: u8 = 162;
 
-/// How often an RC sends [`PLI_PING`].
+/// How often an RC sends [`PLI_PONG`].
 pub const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
 
 /// The keepalive: id 162 and no payload. The link adds the line feed.
 pub fn ping_message() -> Vec<u8> {
-    message(PLI_PING, b"")
+    message(PLI_PONG, b"")
 }
 
 /// Player prop ids carried in `ADDPLAYER`.
@@ -314,7 +316,7 @@ pub fn parse_event(m: &Message) -> Event {
             Some(addr) => Event::NpcServerAddr(addr),
             None => Event::Other(m.id, p.clone()),
         },
-        PLO_RC_PLAYERFLAGS => Event::PlayerFlags(p.clone()),
+        PLO_RC_UNKNOWN124 => Event::PlayerFlags(p.clone()),
         id => Event::Other(id, p.clone()),
     }
 }
@@ -756,11 +758,11 @@ mod tests {
 
     #[test]
     fn ping_message_is_an_empty_162_and_124_is_not_parsed() {
-        assert_eq!(PLI_PING, 162);
-        assert_eq!(ping_message(), vec![gchar(PLI_PING)]);
-        assert_eq!(PLO_RC_PLAYERFLAGS, 124);
+        assert_eq!(PLI_PONG, 162);
+        assert_eq!(ping_message(), vec![gchar(PLI_PONG)]);
+        assert_eq!(PLO_RC_UNKNOWN124, 124);
         let ev = parse_event(&seihai_core::protocol::Message {
-            id: PLO_RC_PLAYERFLAGS,
+            id: PLO_RC_UNKNOWN124,
             payload: vec![0x10, 0x21],
         });
         assert_eq!(ev, Event::PlayerFlags(vec![0x10, 0x21]));

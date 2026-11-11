@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use seihai_core::protocol::{split_messages, write_zlib_frame, zlib_decompress};
-use seihai_rc::rc::{LoginParams, RcKind, Session, PLI_PING};
+use seihai_rc::rc::{LoginParams, RcKind, Session, PLI_PONG};
 
 fn read_frame(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut lenb = [0u8; 2];
@@ -68,7 +68,7 @@ fn empty_162_arrives_before_the_idle_close() {
                 Ok(body) => {
                     if split_messages(&body)
                         .iter()
-                        .any(|m| m.id == PLI_PING && m.payload.is_empty())
+                        .any(|m| m.id == PLI_PONG && m.payload.is_empty())
                     {
                         saw_ping = true;
                     }
