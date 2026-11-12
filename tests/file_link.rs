@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use seihai_core::protocol::{read_gint3, zlib_decompress};
-use seihai_rc::files::{FileError, MAX_FILE_BYTES};
+use seihai_rc::files::{FileError, LARGE_CHUNK_BYTES, MAX_FILE_BYTES, MAX_LARGE_FILE_BYTES};
 use seihai_rc::link::Codec;
 use seihai_rc::rc::{Event, LoginParams, RcKind, Session};
 use seihai_rc::wire::{gchar, message, push_gint5, push_gstring, read_gstring, text};
@@ -90,6 +90,27 @@ fn file_reply(name: &str, data: &[u8]) -> Vec<u8> {
     body
 }
 
+/// A large file the way the gserver-v2 fork sends it: id 68 with the name,
+/// id 84 with a GINT5 size, one id 102 block per 32000 bytes, then id 69.
+/// `size` is what id 84 says, so a test can make it disagree.
+fn large_file_reply(name: &str, data: &[u8], size: u32) -> Vec<u8> {
+    let mut out = with_nl(message(68, name.as_bytes()));
+    let mut p = Vec::new();
+    push_gint5(&mut p, size);
+    out.extend(with_nl(message(84, &p)));
+    for piece in data.chunks(32000) {
+        out.extend(file_reply(name, piece));
+    }
+    out.extend(with_nl(message(69, name.as_bytes())));
+    out
+}
+
+/// Bytes that do not repeat on a 32000 boundary, so a lost or doubled piece
+/// shows.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
 fn text_reply(words: &[u8]) -> Vec<u8> {
     with_nl(message(67, words))
 }
@@ -98,6 +119,10 @@ struct Seen {
     lists: Vec<String>,
     gets: Vec<String>,
     puts: Vec<(String, Vec<u8>)>,
+    /// A large put after id 155: the name and the pieces so far.
+    large: Option<(String, Vec<u8>)>,
+    /// How many id 93 blocks each large put came in.
+    large_pieces: Vec<usize>,
 }
 
 fn take_put(payload: &[u8]) -> (String, Vec<u8>) {
@@ -142,8 +167,28 @@ fn reply(m: &seihai_core::protocol::Message, seen: &mut Seen) -> Option<Vec<u8>>
                 "levels/a.nw" => file_reply("a.nw", LEVEL),
                 "levels/empty.nw" => file_reply("empty.nw", b""),
                 "huge.bin" => file_reply("huge.bin", &vec![0xAB; MAX_FILE_BYTES + 1]),
+                // 40000 bytes: under MAX_FILE_BYTES, but the fork sends
+                // anything over 32000 in pieces.
+                "mid.png" => large_file_reply("mid.png", &pattern(40_000), 40_000),
+                "big.png" => large_file_reply("big.png", &pattern(100_000), 100_000),
+                "short.png" => large_file_reply("short.png", &pattern(40_000), 50_000),
+                "liar.png" => large_file_reply("liar.png", &pattern(40_000), 30_000),
+                "vast.png" => large_file_reply("vast.png", b"", MAX_LARGE_FILE_BYTES as u32 + 1),
                 _ => text_reply(b"no such file"),
             })
+        }
+        155 => {
+            assert!(seen.large.is_none(), "a large put started inside another");
+            seen.large = Some((text(&m.payload), Vec::new()));
+            seen.large_pieces.push(0);
+            None
+        }
+        156 => {
+            let name = text(&m.payload);
+            let (started, data) = seen.large.take().expect("156 without 155");
+            assert_eq!(started, name, "155 and 156 name the same file");
+            seen.puts.push((name.clone(), data));
+            Some(text_reply(format!("Uploaded large file {name}").as_bytes()))
         }
         _ => None,
     }
@@ -166,6 +211,8 @@ fn fake_file_server() -> (String, JoinHandle<Seen>) {
             lists: Vec::new(),
             gets: Vec::new(),
             puts: Vec::new(),
+            large: None,
+            large_pieces: Vec::new(),
         };
         while let Ok(frame) = read_frame(&mut stream) {
             let body = codec.decode(&frame).unwrap();
@@ -173,6 +220,14 @@ fn fake_file_server() -> (String, JoinHandle<Seen>) {
                 let (id, payload) = split_client_raw(&body);
                 assert_eq!(id, 93);
                 let put = take_put(&payload);
+                if let Some((name, data)) = seen.large.as_mut() {
+                    // The fork keeps a piece of a large put and does not
+                    // answer it.
+                    assert_eq!(*name, put.0, "every piece names the large file");
+                    data.extend_from_slice(&put.1);
+                    *seen.large_pieces.last_mut().unwrap() += 1;
+                    continue;
+                }
                 let ack = format!("Uploaded file {}", put.0);
                 if put.0 == "levels/nope.nw" {
                     send_body(&mut stream, &mut codec, &text_reply(b"not stored"));
@@ -261,11 +316,11 @@ fn malformed_lengths_and_too_large_file_do_not_panic() {
         }
         other => panic!("expected too large, got {other:?}"),
     }
-    let big = vec![1u8; MAX_FILE_BYTES + 1];
+    let big = vec![1u8; MAX_LARGE_FILE_BYTES + 1];
     match session.put_file("levels/big.nw", &big, TIMEOUT) {
         Err(FileError::TooLarge { len, max }) => {
             assert_eq!(len, big.len());
-            assert_eq!(max, MAX_FILE_BYTES);
+            assert_eq!(max, MAX_LARGE_FILE_BYTES);
         }
         other => panic!("expected too large, got {other:?}"),
     }
@@ -281,4 +336,76 @@ fn malformed_lengths_and_too_large_file_do_not_panic() {
         "a refused put of a too-large file must not be sent"
     );
     assert_eq!(seen.gets, ["missing.nw", "huge.bin"]);
+}
+
+#[test]
+fn large_files_travel_in_pieces() {
+    let (addr, handle) = fake_file_server();
+    let mut session = Session::login(&addr, &params(RcKind::Gen5), TIMEOUT).unwrap();
+    assert_eq!(
+        session.get_file("mid.png", TIMEOUT).unwrap(),
+        pattern(40_000)
+    );
+    assert_eq!(
+        session.get_file("big.png", TIMEOUT).unwrap(),
+        pattern(100_000)
+    );
+    // A put of exactly MAX_FILE_BYTES is still one block; one byte more is
+    // a large put.
+    let edge = pattern(MAX_FILE_BYTES);
+    session.put_file("edge.png", &edge, TIMEOUT).unwrap();
+    let big = pattern(MAX_FILE_BYTES + 1);
+    session.put_file("big.png", &big, TIMEOUT).unwrap();
+    let exact = pattern(LARGE_CHUNK_BYTES * 3);
+    session.put_file("exact.png", &exact, TIMEOUT).unwrap();
+    // Queued events before the file are still there afterwards.
+    assert_eq!(
+        session.next_event(Instant::now()).unwrap(),
+        Some(Event::Signature)
+    );
+    session.close();
+    let seen = handle.join().unwrap();
+    assert_eq!(
+        seen.puts,
+        [
+            ("edge.png".into(), edge),
+            ("big.png".into(), big),
+            ("exact.png".into(), exact),
+        ]
+    );
+    // 61441 bytes is two pieces; 96000 is three, with no empty fourth.
+    assert_eq!(seen.large_pieces, [2, 3]);
+}
+
+#[test]
+fn large_file_that_disagrees_with_its_size_is_an_error() {
+    let (addr, handle) = fake_file_server();
+    let mut session = Session::login(&addr, &params(RcKind::Gen5), TIMEOUT).unwrap();
+    assert!(matches!(
+        session.get_file("short.png", TIMEOUT),
+        Err(FileError::Malformed(_))
+    ));
+    session.close();
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_file_server();
+    let mut session = Session::login(&addr, &params(RcKind::Gen5), TIMEOUT).unwrap();
+    assert!(matches!(
+        session.get_file("liar.png", TIMEOUT),
+        Err(FileError::Malformed(_))
+    ));
+    session.close();
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_file_server();
+    let mut session = Session::login(&addr, &params(RcKind::Gen5), TIMEOUT).unwrap();
+    match session.get_file("vast.png", TIMEOUT) {
+        Err(FileError::TooLarge { len, max }) => {
+            assert_eq!(len, MAX_LARGE_FILE_BYTES + 1);
+            assert_eq!(max, MAX_LARGE_FILE_BYTES);
+        }
+        other => panic!("expected too large, got {other:?}"),
+    }
+    session.close();
+    handle.join().unwrap();
 }
