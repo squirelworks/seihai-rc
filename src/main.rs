@@ -32,6 +32,8 @@ USAGE:
                     --account NAME [--for SECS] [--say TEXT] [options]
   seihai-rc players list (--server ... | --listserver ... --pick ...)
                     --account NAME [--tsv] [--settle MS] [options]
+  seihai-rc rcs list (--server ... | --listserver ... --pick ...)
+                    --account NAME [--tsv] [--settle MS] [options]
   seihai-rc players pm WHO[,WHO...] TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players admin-pm WHO TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
@@ -66,6 +68,9 @@ USAGE:
                 chat for --for seconds (default 5; 0 = until the server
                 closes the link). --say sends one RC chat line first.
   players list  Log in and print the players and RCs online.
+  rcs list      Log in and print the other RCs online. They come from
+                the player list (an RC has an empty level); no RC sends
+                id 65, so neither does this.
   players pm    Private message (id 28) to one or more players or RCs.
   players say   Admin message to everyone online (id 63).
   players admin-pm
@@ -164,7 +169,7 @@ OPTIONS:
                        and password go sealed. Needs --server-key.
   --server-key KEY     The listserver's Ed25519 public key, unpadded
                        base64. The password is not sent if it does not match.
-  --tsv                players list and nc npcs: tab-separated, with a header.
+  --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
   -v, --verbose        Also show the ids of messages not printed as text.
   -V, --version        Print the version.
 ";
@@ -534,6 +539,33 @@ fn cmd_players_list(o: &Opts) -> Result<(), String> {
         let n = s.players.players.values().filter(|e| !e.is_rc()).count();
         let r = s.players.players.len() - n;
         println!("{n} player(s), {r} other RC(s)");
+    }
+    s.close();
+    Ok(())
+}
+
+/// The other RCs online: the player list filtered through `is_rc`. Real
+/// RCs list RCs this way; id 65 is never sent.
+fn cmd_rcs_list(o: &Opts) -> Result<(), String> {
+    let (s, _) = players_session(o)?;
+    if o.tsv {
+        println!("id\taccount\tnickname\tstatus\tcommunity");
+    } else {
+        println!("{:>5}  {:<20}  nickname", "id", "account");
+    }
+    let rcs: Vec<&PlayerEntry> = s.players.players.values().filter(|e| e.is_rc()).collect();
+    for e in &rcs {
+        if o.tsv {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                e.id, e.account, e.nickname, e.status, e.community
+            );
+        } else {
+            println!("{:>5}  {:<20}  {}", e.id, e.account, e.nickname);
+        }
+    }
+    if !o.tsv {
+        println!("{} other RC(s)", rcs.len());
     }
     s.close();
     Ok(())
@@ -1654,6 +1686,7 @@ fn main() -> ExitCode {
         ["servers"] => cmd_servers(&o),
         ["login"] => cmd_login(&o),
         ["players", "list"] | ["players"] => cmd_players_list(&o),
+        ["rcs", "list"] | ["rcs"] => cmd_rcs_list(&o),
         ["players", "pm", who, words @ ..] if !words.is_empty() => cmd_players_pm(&o, who, words),
         ["players", "say", words @ ..] if !words.is_empty() => cmd_players_say(&o, words),
         ["players", "admin-pm", who, words @ ..] if !words.is_empty() => {

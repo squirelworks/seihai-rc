@@ -734,6 +734,32 @@ fn run_group(group: &str, addr: &str, extra: &[&str]) -> (bool, String, String) 
 }
 
 #[test]
+fn rcs_list_prints_only_the_rcs_from_the_player_list() {
+    let (addr, h) = fake_gserver(true);
+    let (ok, out, err) = run_group("rcs", &addr, &["list"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("200  staff"), "{out}");
+    assert!(out.contains("*staff"), "{out}");
+    assert!(!out.contains("alice"), "a player is not an RC: {out}");
+    assert!(out.contains("1 other RC(s)"), "{out}");
+    let seen = h.join().unwrap();
+    // Built from ADDPLAYER/DELPLAYER only: id 65 is never sent.
+    assert!(seen.after.iter().all(|m| m.id != 65), "{:?}", seen.after);
+}
+
+#[test]
+fn rcs_list_tsv() {
+    let (addr, h) = fake_gserver(true);
+    let (ok, out, err) = run_group("rcs", &addr, &["list", "--tsv"]);
+    assert!(ok, "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "id\taccount\tnickname\tstatus\tcommunity");
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(lines[1].starts_with("200\tstaff\t*staff\t"), "{out}");
+    h.join().unwrap();
+}
+
+#[test]
 fn players_pm_sends_count_ids_and_text() {
     let (addr, h) = fake_gserver_actions(false);
     let (ok, out, err) = run_players(&addr, &["pm", "2,bob", "hello", "there"]);

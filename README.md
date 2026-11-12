@@ -48,6 +48,9 @@ seihai-rc servers --listserver 127.0.0.1:14922 --account myrc \
 seihai-rc players list --server 127.0.0.1:14802 --account myrc
 seihai-rc players list --listserver 127.0.0.1:14922 --pick "My Server" --account myrc --tsv
 
+# Other RCs online (from the player list; an RC has an empty level)
+seihai-rc rcs list --server 127.0.0.1:14802 --account myrc
+
 # Player actions: WHO is an id or an account from the player list
 seihai-rc players pm 2,bob "Meet at the shop" --server 127.0.0.1:14802 --account myrc
 seihai-rc players say "Restart in 5 minutes" --server 127.0.0.1:14802 --account myrc
