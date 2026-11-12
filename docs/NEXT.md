@@ -34,6 +34,12 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
       **check**. Evidence: unit test and fake gserver.
 - [x] Upstream gs2lib packet names: `PLI_PONG` (162, was `PLI_PING`) and
       `PLO_RC_UNKNOWN124` (124, was `PLO_RC_PLAYERFLAGS`). Names only.
+- [x] A test against the real seihai-listserver, not only the fake one:
+      `tests/real_listserver.rs` starts it (dev-dependency at tag `v0.1.0`)
+      on free loopback ports, registers a hidden (HQ level 0) and a gold
+      gserver, and checks `fetch_rc_list` and `servers` list both, the
+      hidden one tagged `U`, and that a wrong password is refused
+      (seihai-listserver issue #19, item 2).
 - [x] RC list over the secure handshake (`--secure-login --server-key`).
       C1 is id 5 plus `SEI00001` and the RC token, C2 seals the id 1
       payload, and the reply is the same id 5 list. The player-list form
