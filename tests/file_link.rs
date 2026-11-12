@@ -201,6 +201,7 @@ fn params(kind: RcKind) -> LoginParams {
         password: "labpw".into(),
         key: 0x35,
         nickname: None,
+        identity: None,
     }
 }
 

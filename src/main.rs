@@ -31,9 +31,9 @@ USAGE:
   seihai-rc login   (--server HOST:PORT | --listserver HOST:PORT --pick NAME|N)
                     --account NAME [--for SECS] [--say TEXT] [options]
   seihai-rc players list (--server ... | --listserver ... --pick ...)
-                    --account NAME [--tsv] [--settle MS] [options]
+                    --account NAME [--tsv | --json] [--settle MS] [options]
   seihai-rc rcs list (--server ... | --listserver ... --pick ...)
-                    --account NAME [--tsv] [--settle MS] [options]
+                    --account NAME [--tsv | --json] [--settle MS] [options]
   seihai-rc players pm WHO[,WHO...] TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players admin-pm WHO TEXT... (--server ... | --listserver ... --pick ...)
   seihai-rc players say TEXT... (--server ... | --listserver ... --pick ...)
@@ -146,7 +146,11 @@ OPTIONS:
                        (type 1, the 2000 to 2002 RCs, plain zlib).
   --token TOKEN        8-byte version token (default GSERV025 for gen5,
                        GSERV023 for classic).
-  --nick NAME          Nickname to send after the login.
+  --nick NAME          Nickname to send after the login (default
+                       *ACCOUNT, as real RCs always send one).
+  --no-nick            Send no nickname after the login.
+  --identity TEXT      gen5 only: text sent after the password in the
+                       login (off by default; old RCs send none).
   --timeout SECS       Connect and login timeout (default 10).
   --settle MS          players: wait until no message came for this
                        long before printing or acting (default 1000).
@@ -170,6 +174,7 @@ OPTIONS:
   --server-key KEY     The listserver's Ed25519 public key, unpadded
                        base64. The password is not sent if it does not match.
   --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
+  --json               players list and rcs list: one JSON array.
   -v, --verbose        Also show the ids of messages not printed as text.
   -V, --version        Print the version.
 ";
@@ -185,6 +190,8 @@ struct Opts {
     rc: Option<String>,
     token: Option<String>,
     nick: Option<String>,
+    no_nick: bool,
+    identity: Option<String>,
     timeout: Option<u64>,
     settle: Option<u64>,
     for_secs: Option<u64>,
@@ -209,6 +216,7 @@ struct Opts {
     script_flag: bool,
     secure_login: bool,
     tsv: bool,
+    json: bool,
     verbose: bool,
 }
 
@@ -235,6 +243,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--rc" => o.rc = Some(val!(&a)),
             "--token" => o.token = Some(val!(&a)),
             "--nick" => o.nick = Some(val!(&a)),
+            "--no-nick" => o.no_nick = true,
+            "--identity" => o.identity = Some(val!(&a)),
             "--say" => o.say = Some(val!(&a)),
             "--discover" => o.discover = Some(val!(&a)),
             "--script" => {
@@ -265,6 +275,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--settle" => o.settle = Some(num(&a, val!(&a))?),
             "--for" => o.for_secs = Some(num(&a, val!(&a))?),
             "--tsv" => o.tsv = true,
+            "--json" => o.json = true,
             "-v" | "--verbose" => o.verbose = true,
             s if s.starts_with('-') => return Err(format!("unknown option {s}")),
             _ => o.cmd.push(a),
@@ -295,6 +306,15 @@ fn common(o: &Opts) -> Result<Common, String> {
         .unwrap_or_else(|| kind.default_token().to_string());
     if token.len() != 8 {
         return Err(format!("--token must be 8 bytes, got {token:?}"));
+    }
+    if o.identity.is_some() && kind == RcKind::Classic {
+        return Err("--identity is for the type-6 (gen5) login only".into());
+    }
+    if o.nick.is_some() && o.no_nick {
+        return Err("give --nick or --no-nick, not both".into());
+    }
+    if o.json && o.tsv {
+        return Err("give --json or --tsv, not both".into());
     }
     let account = o.account.clone().ok_or("--account is required")?;
     let var = o
@@ -337,14 +357,7 @@ fn target(o: &Opts, c: &Common) -> Result<String, String> {
 
 fn login(o: &Opts, c: &Common) -> Result<(Session, String), String> {
     let addr = target(o, c)?;
-    let p = LoginParams {
-        kind: c.kind,
-        token: c.token.clone(),
-        account: c.account.clone(),
-        password: c.password.clone(),
-        key: c.key,
-        nickname: o.nick.clone(),
-    };
+    let p = login_params(o, c);
     let s =
         Session::login(&addr, &p, c.timeout).map_err(|e| format!("{addr}: login failed: {e}"))?;
     eprintln!("logged in to {addr} as {}", c.account);
@@ -378,6 +391,8 @@ fn print_event(ev: &Event, verbose: bool) {
         Event::AddPlayer(e) => println!("{}", player_line("online", e)),
         Event::UpdatePlayer(e) => println!("{}", player_line("update", e)),
         Event::DelPlayer(id) => println!("[offline] {id}"),
+        Event::OtherProps(id, _) if verbose => eprintln!("[id 8] props for unlisted {id}"),
+        Event::OtherProps(..) => {}
         Event::NpcServerAddr(addr) => {
             println!("[npc-server] {} {}", addr.player_id, addr.raw);
         }
@@ -474,6 +489,46 @@ fn row(e: &PlayerEntry, tsv: bool) -> String {
     }
 }
 
+/// A JSON string, with the escapes JSON needs.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `players list --json` and `rcs list --json`: one array of objects, the
+/// same fields as `--tsv`.
+fn players_json(entries: &[&PlayerEntry]) -> String {
+    let rows: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "{{\"id\":{},\"kind\":{},\"account\":{},\"nickname\":{},\"level\":{},\"status\":{},\"community\":{}}}",
+                e.id,
+                json_str(if e.is_rc() { "rc" } else { "player" }),
+                json_str(&e.account),
+                json_str(&e.nickname),
+                json_str(&e.level),
+                e.status,
+                json_str(&e.community)
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
 fn cmd_nc_login(o: &Opts) -> Result<(), String> {
     let c = common(o)?;
     if o.listserver.is_some() || o.pick.is_some() {
@@ -524,6 +579,12 @@ fn cmd_players_list(o: &Opts) -> Result<(), String> {
     let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
     s.settle(quiet, Instant::now() + c.timeout)
         .map_err(|e| e.to_string())?;
+    if o.json {
+        let all: Vec<&PlayerEntry> = s.players.players.values().collect();
+        println!("{}", players_json(&all));
+        s.close();
+        return Ok(());
+    }
     if o.tsv {
         println!("id\tkind\taccount\tnickname\tlevel\tstatus\tcommunity");
     } else {
@@ -548,6 +609,12 @@ fn cmd_players_list(o: &Opts) -> Result<(), String> {
 /// RCs list RCs this way; id 65 is never sent.
 fn cmd_rcs_list(o: &Opts) -> Result<(), String> {
     let (s, _) = players_session(o)?;
+    if o.json {
+        let rcs: Vec<&PlayerEntry> = s.players.players.values().filter(|e| e.is_rc()).collect();
+        println!("{}", players_json(&rcs));
+        s.close();
+        return Ok(());
+    }
     if o.tsv {
         println!("id\taccount\tnickname\tstatus\tcommunity");
     } else {
@@ -1255,8 +1322,20 @@ fn login_params(o: &Opts, c: &Common) -> LoginParams {
         account: c.account.clone(),
         password: c.password.clone(),
         key: c.key,
-        nickname: o.nick.clone(),
+        nickname: default_nick(o, &c.account),
+        identity: o.identity.clone(),
     }
+}
+
+/// The nickname to send after the login. Real RCs always send one, so with
+/// no `--nick` we send `*account`, the name the fork shows for an RC that
+/// sends none: the same name on screen, and the same messages on the wire
+/// as a real RC. `--no-nick` sends nothing.
+fn default_nick(o: &Opts, account: &str) -> Option<String> {
+    if o.no_nick {
+        return None;
+    }
+    Some(o.nick.clone().unwrap_or_else(|| format!("*{account}")))
 }
 
 fn discover_at(addr: &str, o: &Opts, c: &Common) -> Result<Vec<NpcServerFound>, String> {

@@ -47,6 +47,7 @@ seihai-rc servers --listserver 127.0.0.1:14922 --account myrc \
 # Players online, direct or picked from the RC list (by number or name)
 seihai-rc players list --server 127.0.0.1:14802 --account myrc
 seihai-rc players list --listserver 127.0.0.1:14922 --pick "My Server" --account myrc --tsv
+seihai-rc players list --server 127.0.0.1:14802 --account myrc --json
 
 # Other RCs online (from the player list; an RC has an empty level)
 seihai-rc rcs list --server 127.0.0.1:14802 --account myrc

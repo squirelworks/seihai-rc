@@ -41,6 +41,10 @@ pub const PLI_NPCSERVERQUERY: u8 = 94;
 pub const NPCSERVER_QUERY_TEXT: &str = "location";
 
 /// Server to client ids an RC handles.
+/// Server to client: props of another player. GSHORT id, then props as
+/// in `ADDPLAYER`. Whether the fork sends it to an RC on a nickname or
+/// level change is **check**; seihai-rc applies it to the list if it comes.
+pub const PLO_OTHERPLPROPS: u8 = 8;
 pub const PLO_DISCMESSAGE: u8 = 16;
 pub const PLO_SIGNATURE: u8 = 25;
 pub const PLO_RC_ADMINMESSAGE: u8 = 35;
@@ -127,8 +131,13 @@ pub struct LoginParams {
     /// Gen-5 key value (0 to 127). Ignored for [`RcKind::Classic`].
     pub key: u8,
     /// Nickname to send after the login, if any. With none the server
-    /// shows `*account`.
+    /// shows `*account`. The command line fills in `*account` when no
+    /// `--nick` is given, as real RCs always send one.
     pub nickname: Option<String>,
+    /// Type 6 only: text sent after the password, as the rest of the login
+    /// line (no length byte). Old RCs send none and that is the default.
+    /// The fork reads it when present; the layout it expects is **check**.
+    pub identity: Option<String>,
 }
 
 /// The login message body for `p`, line feed included.
@@ -142,6 +151,11 @@ pub fn login_body(p: &LoginParams) -> Vec<u8> {
     b.extend_from_slice(&token);
     push_gstring(&mut b, &latin1_bytes(&p.account));
     push_gstring(&mut b, &latin1_bytes(&p.password));
+    if p.kind == RcKind::Gen5 {
+        if let Some(id) = &p.identity {
+            b.extend(latin1_bytes(id).into_iter().filter(|&c| c != b'\n'));
+        }
+    }
     b.push(b'\n');
     b
 }
@@ -280,8 +294,12 @@ pub enum Event {
     PrivateMessage { from: u16, text: String },
     /// A player or RC arrived. This id was not in the list.
     AddPlayer(PlayerEntry),
-    /// `ADDPLAYER` for an id already listed. The fork resends it when props change.
+    /// `ADDPLAYER` for an id already listed (the fork resends it when props
+    /// change), or `OTHERPLPROPS` for a listed id: the entry as it is now.
     UpdatePlayer(PlayerEntry),
+    /// `OTHERPLPROPS` (8) as read. [`PlayerList::observe`] turns it into
+    /// `UpdatePlayer` when the id is listed; for an unlisted id it stays as is.
+    OtherProps(u16, PropUpdate),
     /// A player or RC left.
     DelPlayer(u16),
     /// Id 79: where an NPC-server player is listening.
@@ -306,6 +324,10 @@ pub fn parse_event(m: &Message) -> Event {
         },
         PLO_ADDPLAYER => match parse_addplayer(p) {
             Some(e) => Event::AddPlayer(e),
+            None => Event::Other(m.id, p.clone()),
+        },
+        PLO_OTHERPLPROPS => match parse_otherplprops(p) {
+            Some((id, u)) => Event::OtherProps(id, u),
             None => Event::Other(m.id, p.clone()),
         },
         PLO_DELPLAYER => match read_gshort(p) {
@@ -343,20 +365,62 @@ pub fn parse_addplayer(p: &[u8]) -> Option<PlayerEntry> {
         account,
         ..Default::default()
     };
+    read_props(p, i)?.apply_to(&mut e);
+    Some(e)
+}
+
+/// The list props a message carried; `None` for a prop it did not carry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PropUpdate {
+    pub nickname: Option<String>,
+    pub level: Option<String>,
+    pub status: Option<u8>,
+    pub community: Option<String>,
+}
+
+impl PropUpdate {
+    /// Copy the props carried into `e`.
+    pub fn apply_to(&self, e: &mut PlayerEntry) {
+        if let Some(v) = &self.nickname {
+            e.nickname = v.clone();
+        }
+        if let Some(v) = &self.level {
+            e.level = v.clone();
+        }
+        if let Some(v) = self.status {
+            e.status = v;
+        }
+        if let Some(v) = &self.community {
+            e.community = v.clone();
+        }
+    }
+}
+
+/// Props from `p[i..]` as `GCHAR id` + value. Reads nickname, level,
+/// community name (GSTRING) and list status (GCHAR), and stops at any
+/// other prop, since its width is not known here.
+fn read_props(p: &[u8], mut i: usize) -> Option<PropUpdate> {
+    let mut u = PropUpdate::default();
     while let Some(&b) = p.get(i) {
         i += 1;
         match b.wrapping_sub(0x20) {
-            PROP_NICKNAME => e.nickname = text(&read_gstring(p, &mut i)?),
-            PROP_LEVEL => e.level = text(&read_gstring(p, &mut i)?),
-            PROP_COMMUNITYNAME => e.community = text(&read_gstring(p, &mut i)?),
+            PROP_NICKNAME => u.nickname = Some(text(&read_gstring(p, &mut i)?)),
+            PROP_LEVEL => u.level = Some(text(&read_gstring(p, &mut i)?)),
+            PROP_COMMUNITYNAME => u.community = Some(text(&read_gstring(p, &mut i)?)),
             PROP_PLAYERLISTSTATUS => {
-                e.status = p.get(i)?.wrapping_sub(0x20);
+                u.status = Some(p.get(i)?.wrapping_sub(0x20));
                 i += 1;
             }
             _ => break,
         }
     }
-    Some(e)
+    Some(u)
+}
+
+/// `OTHERPLPROPS` (8): GSHORT id, then props as in `ADDPLAYER`.
+pub fn parse_otherplprops(p: &[u8]) -> Option<(u16, PropUpdate)> {
+    let id = read_gshort(p)?;
+    Some((id, read_props(p, 2)?))
 }
 
 /// The players and RCs online, by id.
@@ -381,9 +445,20 @@ impl PlayerList {
     /// `UpdatePlayer`, because the fork resends `ADDPLAYER` when props change
     /// and that is not a new arrival. After `DelPlayer`, the next one is an
     /// arrival again.
+    ///
+    /// `OtherProps` for a listed id is applied to the stored entry and comes
+    /// back as `UpdatePlayer` with the entry as it is now.
     pub fn observe(&mut self, ev: Event) -> Event {
         let ev = match ev {
             Event::AddPlayer(e) if self.players.contains_key(&e.id) => Event::UpdatePlayer(e),
+            Event::OtherProps(id, u) => match self.players.get(&id) {
+                Some(old) => {
+                    let mut e = old.clone();
+                    u.apply_to(&mut e);
+                    Event::UpdatePlayer(e)
+                }
+                None => Event::OtherProps(id, u),
+            },
             other => other,
         };
         self.apply(&ev);
@@ -642,6 +717,7 @@ mod tests {
             password: "pw".into(),
             key: 0x2A,
             nickname: None,
+            identity: None,
         }
     }
 
@@ -656,6 +732,48 @@ mod tests {
             login_body(&params(RcKind::Classic)),
             b"!GSERV023%admin\"pw\n"
         );
+    }
+
+    #[test]
+    fn identity_follows_the_password_on_type_6_only() {
+        let mut p = params(RcKind::Gen5);
+        p.identity = Some("win,seihai".into());
+        assert_eq!(login_body(&p), b"&JGSERV025%admin\"pwwin,seihai\n");
+        p.kind = RcKind::Classic;
+        assert_eq!(login_body(&p), b"!GSERV025%admin\"pw\n");
+    }
+
+    #[test]
+    fn otherplprops_updates_a_listed_entry_only() {
+        let mut l = PlayerList::default();
+        let bob = PlayerEntry {
+            id: 3,
+            account: "bob".into(),
+            nickname: "Bob".into(),
+            level: "a.nw".into(),
+            ..Default::default()
+        };
+        l.observe(Event::AddPlayer(bob.clone()));
+        // id 3: level "cave.nw", then x (prop 15, unknown width): stop there.
+        let mut p = vec![0x20, 0x23, gchar(PROP_LEVEL)];
+        push_gstring(&mut p, b"cave.nw");
+        p.extend_from_slice(&[gchar(15), gchar(60)]);
+        let ev = parse_event(&Message {
+            id: PLO_OTHERPLPROPS,
+            payload: p.clone(),
+        });
+        let mut want = bob.clone();
+        want.level = "cave.nw".into();
+        assert_eq!(l.observe(ev), Event::UpdatePlayer(want.clone()));
+        assert_eq!(l.players[&3], want);
+        // An unlisted id is not added.
+        p[1] = 0x29;
+        let ev = parse_event(&Message {
+            id: PLO_OTHERPLPROPS,
+            payload: p,
+        });
+        assert!(matches!(l.observe(ev), Event::OtherProps(9, _)));
+        assert_eq!(l.players.len(), 1);
     }
 
     #[test]

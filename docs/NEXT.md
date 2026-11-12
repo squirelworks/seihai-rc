@@ -17,13 +17,21 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
       (not on the NPC-Control socket), and id 124 printed as raw hex, layout
       unknown. Evidence: `tests/keepalive.rs`. No real client was run
       (PR #21, issue #19).
-- [ ] Read `PLO_OTHERPLPROPS` (8) for RCs if the fork sends it on nickname or
-      level changes (**check**), and update `PlayerList`.
-- [ ] `--nick` default: real RCs always send a nickname; decide whether to send
-      `*account` ourselves.
-- [ ] `players list --json` for scripts.
-- [ ] Optional identity string after the password in the type-6 login (the fork
-      reads it if present; old RCs send none).
+- [x] Read `PLO_OTHERPLPROPS` (8) for RCs and update `PlayerList`: a listed
+      id gets the nickname, level, status or community it carries, shown as
+      `[update]`; an unlisted id is not added. Whether the fork sends 8 to an
+      RC is still **check**. Evidence: unit test and fake gserver. No real
+      client.
+- [x] `--nick` default: with no `--nick` the CLI sends `*account`. Real RCs
+      always send a nickname, and `*account` is what the fork shows for an RC
+      that sends none, so the screen is the same and the wire matches a real
+      RC. `--no-nick` sends nothing. Evidence: fake gserver.
+- [x] `players list --json` (and `rcs list --json`) for scripts: one array,
+      the `--tsv` fields.
+- [x] Optional identity string after the password in the type-6 login:
+      `--identity TEXT`, sent as the rest of the login line, off by default
+      and refused with `--rc classic`. The text the fork expects is
+      **check**. Evidence: unit test and fake gserver.
 - [x] Upstream gs2lib packet names: `PLI_PONG` (162, was `PLI_PING`) and
       `PLO_RC_UNKNOWN124` (124, was `PLO_RC_PLAYERFLAGS`). Names only.
 - [x] RC list over the secure handshake (`--secure-login --server-key`).
