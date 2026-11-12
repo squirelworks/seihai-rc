@@ -122,8 +122,9 @@ fn fake(mut world: World) -> (String, JoinHandle<(Vec<String>, World)>) {
                     }
                     96 => {
                         let mut i = 0;
-                        let name = text(&read_gstring(p, &mut i).unwrap());
-                        let to = text(&p[i..]);
+                        // The fork's order: GSTRING folder, then the name.
+                        let to = text(&read_gstring(p, &mut i).unwrap());
+                        let name = text(&p[i..]);
                         seen.push(format!("96 {name} {to}"));
                         let data = world.get_mut(&cwd).unwrap().remove(&name).unwrap();
                         world.get_mut(&to).unwrap().insert(name.clone(), data);

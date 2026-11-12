@@ -33,9 +33,9 @@
 //!   field. The fork answers id 67, `Uploaded file ` and the name. Any other
 //!   id 67 is a refusal.
 //!
-//! - Move, id [`pli::RC_FILEBROWSER_MOVE`] (96): a `GSTRING` file name in the
-//!   folder from the last list, then the target folder as the rest of the
-//!   line. **check**
+//! - Move, id [`pli::RC_FILEBROWSER_MOVE`] (96): a `GSTRING` target folder,
+//!   then the file name in the folder from the last list as the rest of the
+//!   line. seihai-gserver-v2 reads this order (lab run 2026-11-12).
 //! - Delete, id [`pli::RC_FILEBROWSER_DELETE`] (97): the file name in the
 //!   folder from the last list, as the rest of the line. **check**
 //! - Rename, id [`pli::RC_FILEBROWSER_RENAME`] (98): two `GSTRING`s, the old
@@ -354,12 +354,13 @@ fn name_bytes(name: &str) -> Result<Vec<u8>, FileError> {
     path_bytes(name, false)
 }
 
-/// Move: `GSTRING` name, then the target folder as the rest of the line.
-/// **check**
+/// Move: `GSTRING` target folder, then the file name (in the folder from
+/// the last list) as the rest of the line. The order seihai-gserver-v2 reads
+/// (lab run 2026-11-12); the earlier reading (name first) was refused there.
 pub fn move_message(name: &str, to_folder: &str) -> Result<Vec<u8>, FileError> {
     let mut p = Vec::new();
-    push_gstring(&mut p, &name_bytes(name)?);
-    p.extend(path_bytes(to_folder, true)?);
+    push_gstring(&mut p, &path_bytes(to_folder, true)?);
+    p.extend(name_bytes(name)?);
     Ok(message(pli::RC_FILEBROWSER_MOVE, &p))
 }
 
@@ -731,8 +732,8 @@ mod tests {
 
     #[test]
     fn move_delete_rename_and_folder_delete_bytes() {
-        // 96: GSTRING name, then the folder as the rest of the line.
-        assert_eq!(move_message("a.nw", "old/").unwrap(), b"\x80$a.nwold/");
+        // 96: GSTRING folder, then the name as the rest of the line.
+        assert_eq!(move_message("a.nw", "old/").unwrap(), b"\x80$old/a.nw");
         // 97: the name as the rest of the line.
         assert_eq!(delete_message("a.nw").unwrap(), b"\x81a.nw");
         // 98: two GSTRINGs.

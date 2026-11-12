@@ -215,26 +215,20 @@ pub fn class_set_message(name: &str, script: &str) -> Result<Vec<u8>, NcError> {
     Ok(message(NC_CLASS_SET, &payload))
 }
 
-/// Id 119: `GSTRING` name, the same string form as [`class_set_message`].
-///
-/// A bare class name (the rest of the line, as id 112 sends) is the other
-/// reading still open. It is not sent.
+/// Id 119: the class name as the rest of the line, as id 112 sends it.
+/// seihai-gserver-v2 reads it this way (lab run 2026-11-12); a `GSTRING`
+/// name made it look for a class whose name starts with the length byte.
 pub fn class_delete_message(name: &str) -> Result<Vec<u8>, NcError> {
-    let mut payload = Vec::new();
-    push_gstring(&mut payload, &gstring_bytes("class name", name)?);
-    Ok(message(NC_CLASS_DELETE, &payload))
+    Ok(message(
+        NC_CLASS_DELETE,
+        &gstring_bytes("class name", name)?,
+    ))
 }
 
-/// Id 188: `GSTRING` name, and only when that string is the whole payload.
-///
-/// A bare name is not read.
+/// Id 188: the class name as the rest of the line (seihai-gserver-v2,
+/// lab run 2026-11-12). An empty payload is not a name.
 pub fn parse_class_delete(payload: &[u8]) -> Option<String> {
-    let mut i = 0;
-    let name = text(&read_gstring(payload, &mut i)?);
-    if i != payload.len() {
-        return None;
-    }
-    Some(name)
+    (!payload.is_empty()).then(|| text(payload))
 }
 
 /// Id 115: no payload.
@@ -342,13 +336,23 @@ pub fn parse_weapon_names(payload: &[u8]) -> Option<Vec<String>> {
     Some(names)
 }
 
-/// Id 33: GSTRING name, GSTRING image, GSHORT length, then that many script
-/// bytes. A length that runs past the message fails. A GINT3 length, which
-/// the notes still need a lab check for, is not tried.
+/// Id 33, as seihai-gserver-v2 sends it to this NC (lab run 2026-11-12):
+/// GSTRING name, GCHAR 0 (the image part), GSTRING image, GCHAR 1 (the
+/// script part), GSHORT length, then that many script bytes: the
+/// `PLO_NPCWEAPONADD` shape. A length that runs past the message fails. A
+/// GINT3 length, which the notes still need a lab check for, is not tried.
 pub fn parse_weapon_script(payload: &[u8]) -> Option<WeaponScript> {
     let mut i = 0;
     let name = text(&read_gstring(payload, &mut i)?);
+    if *payload.get(i)? != 32 {
+        return None;
+    }
+    i += 1;
     let image = text(&read_gstring(payload, &mut i)?);
+    if *payload.get(i)? != 33 {
+        return None;
+    }
+    i += 1;
     let len = usize::from(read_gshort(payload.get(i..)?)?);
     i += 2;
     let script = text(payload.get(i..i + len)?);
@@ -725,11 +729,9 @@ mod tests {
         let set = class_set_message("Guard", "return;").unwrap();
         let delete = class_delete_message("Guard").unwrap();
         assert_eq!(delete[0], gchar(NC_CLASS_DELETE));
-        // GSTRING name, the bytes class set writes before the script.
-        assert_eq!(&delete[1..], b"%Guard");
-        assert_eq!(&set[1..1 + delete.len() - 1], &delete[1..]);
-        // A bare name is the other reading. It is not what we send.
-        assert_ne!(&delete[1..], b"Guard");
+        // The bare name, as the fork reads it; not the GSTRING class set writes.
+        assert_eq!(&delete[1..], b"Guard");
+        assert_eq!(&set[1..2], b"%");
         assert!(class_delete_message("a\nb").is_err());
     }
 
@@ -763,7 +765,9 @@ mod tests {
     fn weapon_script_uses_a_gshort_length() {
         let mut payload = Vec::new();
         push_gstring(&mut payload, b"sword");
+        payload.push(32);
         push_gstring(&mut payload, b"sword.png");
+        payload.push(33);
         crate::wire::push_gshort(&mut payload, 7);
         payload.extend_from_slice(b"return;");
         let weapon = parse_weapon_script(&payload).unwrap();
@@ -785,12 +789,10 @@ mod tests {
     }
 
     #[test]
-    fn class_delete_notify_is_a_gstring_name() {
-        let mut payload = Vec::new();
-        push_gstring(&mut payload, b"Foo");
+    fn class_delete_notify_is_the_bare_name() {
         let ev = parse_event(&Message {
             id: NC_CLASS_DELETE_NOTIFY,
-            payload: payload.clone(),
+            payload: b"Foo".to_vec(),
         });
         assert_eq!(ev, NcEvent::ClassDeleted("Foo".into()));
         let mut lists = NcLists::default();
@@ -798,16 +800,7 @@ mod tests {
         lists.classes.push("Bar".into());
         lists.apply(&ev);
         assert_eq!(lists.classes, ["Bar"]);
-        // A bare name is not read, and it does not drop a class.
-        let bare = parse_event(&Message {
-            id: NC_CLASS_DELETE_NOTIFY,
-            payload: b"Foo".to_vec(),
-        });
-        assert!(matches!(bare, NcEvent::Message { id: 188, .. }));
-        lists.apply(&bare);
-        assert_eq!(lists.classes, ["Bar"]);
-        payload.push(b'x');
-        assert!(parse_class_delete(&payload).is_none());
+        assert!(parse_class_delete(b"").is_none());
     }
 
     #[test]

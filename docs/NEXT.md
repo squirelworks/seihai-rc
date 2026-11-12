@@ -10,9 +10,11 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 - [x] `login`: print `[update]` rather than `[online]` when `ADDPLAYER` comes for
       an id already listed (the fork resends it when props change). The stored
       entry is replaced; after `DELPLAYER` the next one is `[online]` again.
-      Evidence: fake gserver in `tests/fake_servers.rs`. No real client. The
-      fork was not re-run (lab pack not available). The resend was seen on
-      2026-10-31 (`docs/lab/2026-10-31-stage1.md`).
+      Evidence: fake gserver in `tests/fake_servers.rs`. Fork run
+      2026-11-12 (`docs/lab/2026-11-12-fork-lab-pass.md`): the fork resends `ADDPLAYER` for an RC that
+      joins (`[update] 5 labrc2 (RC)`), but sent none for a player whose
+      props an RC set. The resend was also seen on 2026-10-31
+      (`docs/lab/2026-10-31-stage1.md`).
 - [x] RC keepalive: an empty id 162 every 60 s on the game-server RC link
       (not on the NPC-Control socket), and id 124 printed as raw hex, layout
       unknown. Evidence: `tests/keepalive.rs`. No real client was run
@@ -144,8 +146,10 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       (`docs/lab/2026-11-07-file-wire.md`). No real client.
 - [x] `files ls|get|put|mv|rename|rm|rmdir` command line. Move (96),
       delete (97), rename (98) and folder delete (160) are sent with the
-      layouts in `docs/PROTOCOL.md`, all **check**: no real RC was captured
-      doing them. Each command lists the folder first (the fork names a file
+      layouts in `docs/PROTOCOL.md`. Fork run 2026-11-12 (`docs/lab/2026-11-12-fork-lab-pass.md`): delete
+      and rename work as sent; move was corrected to `GSTRING` folder, then
+      the name, the order the fork reads; folder delete was not run. No real
+      RC was captured doing them. Each command lists the folder first (the fork names a file
       by the folder from the last list), prints the server's id 67 lines,
       and lists again to see whether the change happened. `rm` and `rmdir`
       need `--yes`. Evidence: `tests/files_cli.rs` (fake gserver) and unit
@@ -181,18 +185,21 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       GSHORT player id, then the text `location`) for each nickname that
       contains `(Server)`, then id 79 (`PLO_NPCSERVERADDR`: GSHORT player id,
       then the rest of the line). The NPC-Control socket is opened only after
-      exactly one line parses as an address. The separator (comma or spaces)
-      still needs a lab check; both shapes are accepted and any other shape,
-      including a colon, does not open the socket.
-      `seihai-rc nc discover --server 127.0.0.1:14802`. Evidence: fake
-      gserver in `tests/nc_commands.rs`. No real client. The fork was not run.
+      exactly one line parses as an address. The fork sends `host,port`
+      with a comma and no spaces (run 2026-11-12, `docs/lab/2026-11-12-fork-lab-pass.md`); both shapes
+      are accepted and any other shape, including a colon, does not open
+      the socket. `seihai-rc nc discover --server 127.0.0.1:14802`.
+      Evidence: fake gserver in `tests/nc_commands.rs` and the fork run.
 - [x] NPC, class and weapon list / get / set / delete. Class delete (119
-      out, 188 in) is a GSTRING name, the same string form as class set. A
-      bare class name is not sent and not read. A script that contains a
-      line break is not sent. A weapon script whose GSHORT length does not
-      fit the message is not parsed. See `docs/PROTOCOL.md`. Evidence:
-      `tests/nc_commands.rs`. No real client. The fork was not run for
-      class delete.
+      out, 188 in) carries the bare class name, and weapon get's 33 has a
+      GCHAR 0 after the name and a GCHAR 1 after the image: both corrected
+      to what the fork does in the run of 2026-11-12 (`docs/lab/2026-11-12-fork-lab-pass.md`), where NC
+      login, NPC list/get/script, class list/set/get/delete and weapon
+      list/get/set/delete all worked against the fork. NPC set and delete
+      were not run. A script that contains a line break is not sent. A
+      weapon script whose GSHORT length does not fit the message is not
+      parsed. See `docs/PROTOCOL.md`. Evidence: `tests/nc_commands.rs` and
+      the fork run.
 
 ## Window
 
