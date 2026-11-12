@@ -51,7 +51,8 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 `players admin-pm ID TEXT` (private admin message),
 `players kick ID`, `players warp ID LEVEL X Y`, `players props ID`,
-`players rights ACCOUNT [--set ...]`, `players ban ACCOUNT [--set ...]`.
+`players rights ACCOUNT [--set ...]`, `players ban ACCOUNT [--set ...]`,
+`rcs list`.
 
 - [x] First slice: `players pm`, `players say`, `players kick`,
       `players warp` (ids 28, 63, 61, 82). Who may be an id or an account
@@ -89,11 +90,12 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
       with a real 2.22 RC). `seihai-rc` has not been re-run against it.
-- [ ] List RCs, moved to v0.2.0 (owner's call, 2026-11-12). No RC client
-      from 1.21 to 2.05 sends id 65 and no server answers it: RCs are listed
-      through the normal player list, where an RC is a player with an empty
-      level. So build it from `PlayerList`, with no new packet (Graal_analysis
-      RC write-up, 2026-11-12).
+- [x] List RCs, for v0.2.0 (owner's call, 2026-11-12): `seihai-rc rcs list`.
+      No RC client from 1.21 to 2.05 sends id 65 and no server answers it:
+      RCs are listed through the normal player list, where an RC is a player
+      with an empty level. So it is built from `PlayerList` and `is_rc()`,
+      with no new packet ([Graal_analysis RC write-up](https://github.com/squirelworks/Graal_analysis/issues/410),
+      2026-11-12). Tested against the fake gserver; not yet run in the lab.
 
 ## Stage 3: accounts
 
