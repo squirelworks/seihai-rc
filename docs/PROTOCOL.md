@@ -359,10 +359,31 @@ prints any id 67 lines and lists the folder again to see the result. A
 list of a folder that is gone gets a refusal, or no answer from the fork.
 
 Id 65 `RC_FILEBROWSER_DIRLIST` is the reply to id 89 `START`, which this
-client does not send. Not sent, layouts unknown: 91 `END`, 155/156 large
-file. A file longer
-than 60 KiB is refused. One frame's length is a `u16`, and those large-file
-ids are how a bigger file would travel once a lab run shows their layout.
+client does not send. Not sent, layout unknown: 91 `END`.
+
+### Large files
+
+One frame's length is a `u16`, so a file over 60 KiB (`MAX_FILE_BYTES`)
+travels in pieces. The layouts are the ones the gserver-v2 fork reads and
+writes, taken from its behaviour; no real RC has been captured doing this
+(**check**).
+
+| Direction | Ids | Layout |
+|---|---|---|
+| Put | 155 `RC_LARGEFILESTART` | **check** The name, the rest of the line. |
+| | 93 inside 50, repeated | **check** Ordinary put blocks, `GSTRING` name (the same name), then at most 32000 bytes of the file. The fork keeps them for that name and does not answer each one. |
+| | 156 `RC_LARGEFILEEND` | **check** The name, the rest of the line. The fork stores the joined file in the folder from the last list and answers id 67 `Uploaded large file ` and the name. |
+| Get | 68 `PLO_LARGEFILESTART` | **check** The name, the rest of the line. |
+| | 84 `PLO_LARGEFILESIZE` | **check** `GINT5` total size. 2.3 and later servers; an older one leaves it out. |
+| | 102 inside 100, repeated | The file block above, at most 32000 bytes each. |
+| | 69 `PLO_LARGEFILEEND` | **check** The name, the rest of the line. |
+
+The fork sends any file over 32000 bytes as a large file, so a get of a
+file between 32000 bytes and 60 KiB comes in pieces too. `seihai-rc` puts a
+file up to 60 KiB in one block, as before, and a bigger one as a large
+file. A get joins the pieces and fails if they come to more or fewer bytes
+than id 84 said. A file over 64 MiB is refused either way, before anything
+is sent or kept.
 
 Paths are relative, `/`-separated. `..`, a leading `/`, a backslash and a
 colon are refused. A trailing `/` is kept. A path longer than 223 bytes is

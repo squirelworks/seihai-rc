@@ -161,7 +161,12 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       unit tests. No real client.
 - [ ] Capture 51 to 54 and 68/69 from a real 2.22 RC against the fork and
       fix the layouts if they differ (lab).
-- [ ] Large-file packets (155/156).
+- [x] Large-file packets: put as 155, put blocks of 32000 bytes, 156;
+      get joins 68, 84, the id 102 pieces and 69. Layouts **check**, from
+      the fork's behaviour. Evidence: `tests/file_link.rs` (fake gserver)
+      and unit tests. No real client.
+- [ ] Capture 155/156 from a real 2.22 RC putting a file over 60 KiB, and a
+      get of one over 32000 bytes against the fork (lab).
 
 ## Stage 5: NPC Control
 

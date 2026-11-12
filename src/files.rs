@@ -48,9 +48,29 @@
 //! 67 lines it sends, and the command line lists the folder again to see
 //! whether the change happened.
 //!
-//! Not sent: 89, 91, 155, 156. A file over [`MAX_FILE_BYTES`]
-//! is refused. One frame length is a `u16`, and the large-file ids are how a
-//! bigger file would travel once a lab run shows their layout.
+//! # Large files
+//!
+//! One frame length is a `u16`, so a file over [`MAX_FILE_BYTES`] travels in
+//! pieces. Layouts are the ones the gserver-v2 fork reads and writes; no
+//! real RC has been captured doing this yet (**check**).
+//!
+//! - Put: id [`pli::RC_LARGEFILESTART`] (155) with the name as the rest of
+//!   the line, then the file as ordinary put blocks (id 93 inside id 50) of at
+//!   most [`LARGE_CHUNK_BYTES`] each, all with the same name, then id
+//!   [`pli::RC_LARGEFILEEND`] (156) with the name as the rest of the line.
+//!   The fork keeps the pieces for that name and joins them; it does not
+//!   answer a piece. On 156 it stores the file in the folder from the last
+//!   list and answers id 67, `Uploaded large file ` and the name.
+//! - Get: the server sends id [`plo::LARGEFILESTART`] (68) with the name as
+//!   the rest of the line, then id [`plo::LARGEFILESIZE`] (84), a `GINT5`
+//!   total size (2.3 and later; an older server leaves it out), then the
+//!   file as id 102 blocks, then id [`plo::LARGEFILEEND`] (69) with the name.
+//!   The fork sends a file over 32000 bytes this way, so a file between that
+//!   and [`MAX_FILE_BYTES`] arrives in pieces too.
+//!
+//! A file over [`MAX_LARGE_FILE_BYTES`] is refused either way.
+//!
+//! Not sent: 89, 91.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -78,8 +98,16 @@ pub const PLO_FILE: u8 = 102;
 /// and for zlib growing a file that does not compress.
 pub const MAX_FILE_BYTES: usize = 60 * 1024;
 
-/// Client to server file-browser ids. START, END and the large-file ids are
-/// not sent.
+/// Bytes of the file in each piece of a large put. The fork sends pieces of
+/// this size, and it leaves room in a frame like [`MAX_FILE_BYTES`] does.
+pub const LARGE_CHUNK_BYTES: usize = 32_000;
+
+/// Largest file sent or accepted as a large file. The whole file is held in
+/// memory, so a server that announces more is refused before any piece is
+/// kept.
+pub const MAX_LARGE_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Client to server file-browser ids. START and END are not sent.
 pub mod pli {
     /// Not sent. Payload unchecked.
     pub const RC_FILEBROWSER_START: u8 = 89;
@@ -97,9 +125,10 @@ pub mod pli {
     pub const RC_FILEBROWSER_DELETE: u8 = 97;
     /// Rename a file. See [`super::rename_message`]. **check**
     pub const RC_FILEBROWSER_RENAME: u8 = 98;
-    /// Not sent. Payload unchecked. For a file that does not fit in one frame.
+    /// A large put starts. The name is the rest of the line. **check**
     pub const RC_LARGEFILESTART: u8 = 155;
-    /// Not sent. Payload unchecked.
+    /// A large put ends and the server stores it. The name is the rest of
+    /// the line. **check**
     pub const RC_LARGEFILEEND: u8 = 156;
     /// Delete a folder. See [`super::folder_delete_message`]. **check**
     pub const RC_FOLDERDELETE: u8 = 160;
@@ -114,6 +143,14 @@ pub mod plo {
     /// A line of text. `Folder changed to ` and `Uploaded file ` are the
     /// answers to list and put. Any other text is a refusal.
     pub const RC_FILEBROWSER_MESSAGE: u8 = 67;
+    /// A large file starts. The name is the rest of the line. Server to
+    /// client only: the same id from the client is the server-flags get.
+    pub const LARGEFILESTART: u8 = 68;
+    /// A large file is complete. The name is the rest of the line.
+    pub const LARGEFILEEND: u8 = 69;
+    /// The total size of the large file, a `GINT5`. Sent after
+    /// [`LARGEFILESTART`] by 2.3 and later servers.
+    pub const LARGEFILESIZE: u8 = 84;
 }
 
 /// The id 67 line that comes before a directory.
@@ -121,6 +158,9 @@ const FOLDER_CHANGED: &str = "Folder changed to ";
 
 /// The id 67 line that means a put was stored.
 const UPLOADED: &str = "Uploaded file ";
+
+/// The id 67 line that means a large put was stored.
+const UPLOADED_LARGE: &str = "Uploaded large file ";
 
 /// Why a list, get or put failed.
 #[derive(Debug)]
@@ -134,7 +174,8 @@ pub enum FileError {
     Timeout,
     /// A length ran past the payload, or a record did not match its length.
     Malformed(String),
-    /// `len` bytes is over [`MAX_FILE_BYTES`].
+    /// `len` bytes is over [`MAX_FILE_BYTES`] for a single block, or over
+    /// [`MAX_LARGE_FILE_BYTES`] for a large file.
     TooLarge {
         len: usize,
         max: usize,
@@ -263,11 +304,44 @@ pub fn upload_body(path: &str, data: &[u8]) -> Result<Vec<u8>, FileError> {
         });
     }
     let path = path_bytes(path, false)?;
+    Ok(put_block(&path, data))
+}
+
+/// Id 93 inside an id 50 raw block: `GSTRING` name, then `data`.
+fn put_block(path: &[u8], data: &[u8]) -> Vec<u8> {
     let mut inner = Vec::with_capacity(2 + path.len() + data.len());
     inner.push(gchar(pli::RC_FILEBROWSER_UP));
-    push_gstring(&mut inner, &path);
+    push_gstring(&mut inner, path);
     inner.extend_from_slice(data);
-    Ok(raw_block(PLI_RAWDATA, &inner))
+    raw_block(PLI_RAWDATA, &inner)
+}
+
+/// A large put as frame bodies, in the order they are sent: id 155 with
+/// the name, one put block per [`LARGE_CHUNK_BYTES`] of the file, then id
+/// 156 with the name. Each body is ready for
+/// [`crate::link::Link::send_body`]. **check**
+///
+/// A file over [`MAX_LARGE_FILE_BYTES`] is refused and nothing is built.
+pub fn large_upload_bodies(path: &str, data: &[u8]) -> Result<Vec<Vec<u8>>, FileError> {
+    if data.len() > MAX_LARGE_FILE_BYTES {
+        return Err(FileError::TooLarge {
+            len: data.len(),
+            max: MAX_LARGE_FILE_BYTES,
+        });
+    }
+    let path = path_bytes(path, false)?;
+    let line = |id| {
+        let mut m = message(id, &path);
+        m.push(b'\n');
+        m
+    };
+    let mut bodies = vec![line(pli::RC_LARGEFILESTART)];
+    bodies.extend(
+        data.chunks(LARGE_CHUNK_BYTES)
+            .map(|piece| put_block(&path, piece)),
+    );
+    bodies.push(line(pli::RC_LARGEFILEEND));
+    Ok(bodies)
 }
 
 /// A bare file name: one path segment, no `/`.
@@ -367,6 +441,19 @@ pub fn parse_dir(payload: &[u8]) -> Result<Vec<String>, FileError> {
 /// One trailing line feed is the raw block's extra byte and is dropped. A
 /// file over [`MAX_FILE_BYTES`] is refused.
 pub fn parse_file_body(payload: &[u8]) -> Result<(String, Vec<u8>), FileError> {
+    let (name, rest) = file_parts(payload)?;
+    if rest.len() > MAX_FILE_BYTES {
+        return Err(FileError::TooLarge {
+            len: rest.len(),
+            max: MAX_FILE_BYTES,
+        });
+    }
+    Ok((name, rest.to_vec()))
+}
+
+/// Name and bytes of an id 102 payload, with no size limit. A piece of a
+/// large file is one of these.
+fn file_parts(payload: &[u8]) -> Result<(String, &[u8]), FileError> {
     let mut i = 0;
     read_gint5(payload, &mut i)
         .ok_or_else(|| FileError::malformed("file time is shorter than a GINT5"))?;
@@ -376,13 +463,66 @@ pub fn parse_file_body(payload: &[u8]) -> Result<(String, Vec<u8>), FileError> {
     if let Some(body) = rest.strip_suffix(b"\n") {
         rest = body;
     }
-    if rest.len() > MAX_FILE_BYTES {
+    Ok((text(&name), rest))
+}
+
+/// A large file being received: the size from id 84, if it came, and the
+/// pieces so far.
+#[derive(Default)]
+struct LargeIn {
+    size: Option<usize>,
+    data: Vec<u8>,
+}
+
+impl LargeIn {
+    /// Add one id 102 piece. More than the announced size, or more than
+    /// [`MAX_LARGE_FILE_BYTES`], is an error.
+    fn push(&mut self, payload: &[u8]) -> Result<(), FileError> {
+        let (_name, piece) = file_parts(payload)?;
+        let len = self.data.len() + piece.len();
+        if len > MAX_LARGE_FILE_BYTES {
+            return Err(FileError::TooLarge {
+                len,
+                max: MAX_LARGE_FILE_BYTES,
+            });
+        }
+        if let Some(size) = self.size {
+            if len > size {
+                return Err(FileError::malformed(format!(
+                    "large file pieces run to {len} bytes; the server said {size}"
+                )));
+            }
+        }
+        self.data.extend_from_slice(piece);
+        Ok(())
+    }
+
+    /// The file, once id 69 has come. Fewer bytes than announced is an
+    /// error.
+    fn finish(self) -> Result<Vec<u8>, FileError> {
+        match self.size {
+            Some(size) if size != self.data.len() => Err(FileError::malformed(format!(
+                "large file ended at {} bytes; the server said {size}",
+                self.data.len()
+            ))),
+            _ => Ok(self.data),
+        }
+    }
+}
+
+/// The size in an id 84 payload.
+fn parse_large_size(payload: &[u8]) -> Result<usize, FileError> {
+    let mut i = 0;
+    let size = read_gint5(payload, &mut i)
+        .ok_or_else(|| FileError::malformed("large file size is shorter than a GINT5"))?;
+    let size = size as usize;
+    if size > MAX_LARGE_FILE_BYTES {
         return Err(FileError::TooLarge {
-            len: rest.len(),
-            max: MAX_FILE_BYTES,
+            len: size,
+            max: MAX_LARGE_FILE_BYTES,
         });
     }
-    Ok((text(&name), rest.to_vec()))
+    Ok(size)
 }
 
 enum Step<T> {
@@ -453,15 +593,47 @@ impl Session {
     ///
     /// The name beside the bytes is the file's own name, which on the
     /// 2026-11-01 run was the last path segment, so it is not compared with
-    /// `path`. Other events stay queued.
+    /// `path`. A file the server sends as a large file (ids 68, 84, 102
+    /// pieces, 69) is joined here. Other events stay queued.
+    ///
+    /// `timeout` covers the whole file, large or not.
     pub fn get_file(&mut self, path: &str, timeout: Duration) -> Result<Vec<u8>, FileError> {
         self.link.send(&[down_message(path)?])?;
         let deadline = Instant::now() + timeout;
+        let mut large: Option<LargeIn> = None;
         self.wait_until(deadline, |ev| match ev {
-            Event::Other(id, p) if id == PLO_FILE => match parse_file_body(&p) {
-                Ok((_name, bytes)) => Step::Done(bytes),
-                Err(e) => Step::Stop(e),
+            Event::Other(id, _) if id == plo::LARGEFILESTART => {
+                large = Some(LargeIn::default());
+                Step::Take
+            }
+            Event::Other(id, p) if id == plo::LARGEFILESIZE && large.is_some() => {
+                match parse_large_size(&p) {
+                    Ok(size) => {
+                        if let Some(l) = large.as_mut() {
+                            l.size = Some(size);
+                        }
+                        Step::Take
+                    }
+                    Err(e) => Step::Stop(e),
+                }
+            }
+            Event::Other(id, p) if id == PLO_FILE => match large.as_mut() {
+                Some(l) => match l.push(&p) {
+                    Ok(()) => Step::Take,
+                    Err(e) => Step::Stop(e),
+                },
+                None => match parse_file_body(&p) {
+                    Ok((_name, bytes)) => Step::Done(bytes),
+                    Err(e) => Step::Stop(e),
+                },
             },
+            Event::Other(id, _) if id == plo::LARGEFILEEND && large.is_some() => {
+                match large.take().map(LargeIn::finish) {
+                    Some(Ok(bytes)) => Step::Done(bytes),
+                    Some(Err(e)) => Step::Stop(e),
+                    None => Step::Take,
+                }
+            }
             Event::Other(id, p) if id == plo::RC_FILEBROWSER_MESSAGE => {
                 Step::Stop(FileError::Refused(text(&p)))
             }
@@ -502,20 +674,31 @@ impl Session {
 
     /// Send `data` as `path`, and wait until the server answers.
     ///
-    /// A file over [`MAX_FILE_BYTES`] is refused and nothing is sent. Id 67
-    /// beginning `Uploaded file ` is success. Any other id 67 is a refusal.
+    /// A file up to [`MAX_FILE_BYTES`] goes in one block, and id 67
+    /// beginning `Uploaded file ` is success. A bigger one goes as a large
+    /// file (see [`large_upload_bodies`]), and id 67 beginning
+    /// `Uploaded large file ` is success. Any other id 67 is a refusal. A
+    /// file over [`MAX_LARGE_FILE_BYTES`] is refused and nothing is sent.
     pub fn put_file(
         &mut self,
         path: &str,
         data: &[u8],
         timeout: Duration,
     ) -> Result<(), FileError> {
-        self.link.send_body(&upload_body(path, data)?)?;
+        let ok = if data.len() <= MAX_FILE_BYTES {
+            self.link.send_body(&upload_body(path, data)?)?;
+            UPLOADED
+        } else {
+            for body in large_upload_bodies(path, data)? {
+                self.link.send_body(&body)?;
+            }
+            UPLOADED_LARGE
+        };
         let deadline = Instant::now() + timeout;
         self.wait_until(deadline, |ev| match ev {
             Event::Other(id, p) if id == plo::RC_FILEBROWSER_MESSAGE => {
                 let msg = text(&p);
-                if msg.starts_with(UPLOADED) {
+                if msg.starts_with(ok) {
                     Step::Done(())
                 } else {
                     Step::Stop(FileError::Refused(msg))
@@ -574,6 +757,52 @@ mod tests {
         // Id 50, GINT3(9), line feed, then id 93, GSTRING "a.nw", "hi\n".
         // No GINT3 size in front of the file.
         assert_eq!(upload_body("a.nw", b"hi\n").unwrap(), b"R  )\n}$a.nwhi\n");
+    }
+
+    #[test]
+    fn large_upload_is_start_pieces_and_end() {
+        let data: Vec<u8> = (0..LARGE_CHUNK_BYTES + 5).map(|i| i as u8).collect();
+        let bodies = large_upload_bodies("a.png", &data).unwrap();
+        assert_eq!(bodies.len(), 4);
+        // 155 and 156 are GCHARs 0xbb and 0xbc, the name, a line feed.
+        assert_eq!(bodies[0], b"\xbba.png\n");
+        assert_eq!(bodies[3], b"\xbca.png\n");
+        // Each piece is an ordinary put block with the same name.
+        assert_eq!(
+            bodies[1],
+            upload_body("a.png", &data[..LARGE_CHUNK_BYTES]).unwrap()
+        );
+        assert_eq!(
+            bodies[2],
+            upload_body("a.png", &data[LARGE_CHUNK_BYTES..]).unwrap()
+        );
+        // Every body still fits in one frame.
+        assert!(bodies.iter().all(|b| b.len() < 65535));
+        assert!(large_upload_bodies("../a.png", &data).is_err());
+    }
+
+    #[test]
+    fn large_size_and_pieces_are_checked() {
+        let mut p = Vec::new();
+        push_gint5(&mut p, 5);
+        assert_eq!(parse_large_size(&p).unwrap(), 5);
+        assert!(parse_large_size(b"  ").is_err());
+        let mut piece = Vec::new();
+        push_gint5(&mut piece, 0);
+        push_gstring(&mut piece, b"a");
+        piece.extend_from_slice(b"abc\n");
+        let mut l = LargeIn {
+            size: Some(5),
+            data: Vec::new(),
+        };
+        l.push(&piece).unwrap();
+        assert!(matches!(l.push(&piece), Err(FileError::Malformed(_))));
+        assert!(matches!(l.finish(), Err(FileError::Malformed(_))));
+        // No size (a pre-2.3 server): the pieces are the file.
+        let mut l = LargeIn::default();
+        l.push(&piece).unwrap();
+        l.push(&piece).unwrap();
+        assert_eq!(l.finish().unwrap(), b"abcabc");
     }
 
     #[test]

@@ -135,8 +135,10 @@ USAGE:
   files ls      List the files in DIR (id 90, reply 66). Default: the
                 folder the server starts in.
   files get     Fetch PATH (id 92, file 102) to --out FILE, or to stdout.
+                A large file (68, 84, pieces, 69) is joined.
   files put     Send LOCAL as PATH (id 93), then list to check it is there.
-                Files are up to 60 KiB.
+                Over 60 KiB it goes as a large file (155, pieces, 156).
+                Files are up to 64 MiB.
   files mv      Move PATH into FOLDER (id 96), then list both folders.
   files rename  Rename PATH to NEWNAME in the same folder (id 98), then list.
   files rm      Delete PATH (id 97), then list. Needs --yes.
