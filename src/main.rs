@@ -25,6 +25,9 @@ use seihai_rc::players::{
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
 };
+use seihai_rc::server::{
+    flags_get, flags_set, normalized, parse_flags, parse_text, plo as server_plo, ServerText,
+};
 
 const USAGE: &str = "\
 seihai-rc: Graal Remote Control client (stage 1, player actions, NPC Control)
@@ -51,6 +54,9 @@ USAGE:
   seihai-rc accounts set ACCOUNT [FIELDS] (--server ... | --listserver ... --pick ...)
   seihai-rc accounts add ACCOUNT --new-password-env VAR [FIELDS] (--server ...)
   seihai-rc accounts delete ACCOUNT --yes (--server ... | --listserver ... --pick ...)
+  seihai-rc server options [--set-file PATH] (--server ... | --listserver ... --pick ...)
+  seihai-rc server folders [--set-file PATH] (--server ... | ...)
+  seihai-rc server flags [--set-file PATH] (--server ... | ...)
   seihai-rc files ls [DIR] (--server ... | --listserver ... --pick ...)
   seihai-rc files get PATH [--out FILE] (--server ... | ...)
   seihai-rc files put LOCAL PATH (--server ... | ...)
@@ -140,6 +146,15 @@ USAGE:
                 names a file by the folder from the last list. The layouts
                 of 96, 97, 98 and 160 are not captured from a real RC yet;
                 the server's lines are printed and the list is the check.
+  server options
+                Print the server options, one per line (id 51, reply 76).
+                --set-file replaces them (id 52) and reads them back.
+  server folders
+                The folder config the same way (id 53, reply 77; set 54).
+  server flags  The server flags, one per line (id 68, reply 61; set 69).
+                Each --set prints the line counts before and after and
+                fails if the server reads back something else. These
+                layouts are not captured from a real RC yet.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -813,6 +828,117 @@ fn cmd_files_rmdir(o: &Opts, folder: &str) -> Result<(), String> {
         Err(e) => Err(e.to_string()),
         Ok(_) => Err(format!("{folder} still lists after the delete")),
     }
+}
+
+/// Read events until message `id` arrives, then parse it.
+fn await_id<T>(
+    s: &mut Session,
+    c: &Common,
+    id: u8,
+    parse: impl Fn(&[u8]) -> Option<T>,
+) -> Result<T, String> {
+    let deadline = Instant::now() + c.timeout;
+    loop {
+        match s.next_event(deadline).map_err(|e| e.to_string())? {
+            Some(Event::Other(got, payload)) if got == id => {
+                return parse(&payload).ok_or_else(|| format!("could not read the id {id} reply"));
+            }
+            Some(Event::Disconnect(why)) => {
+                return Err(format!("the server closed the link: {why}"))
+            }
+            Some(_) => {}
+            None => return Err(format!("no reply (id {id}) before the timeout")),
+        }
+    }
+}
+
+/// The new lines from `--set-file`, if given. `--set` is not taken: these
+/// are many lines.
+fn set_file_lines(o: &Opts) -> Result<Option<String>, String> {
+    if o.set.is_some() {
+        return Err("use --set-file PATH, one entry per line".into());
+    }
+    match &o.set_file {
+        Some(path) => Ok(Some(
+            std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Get, and with `--set-file` set and read back: options or folder config.
+fn cmd_server_text(o: &Opts, which: ServerText) -> Result<(), String> {
+    let new = set_file_lines(o)?;
+    let (mut s, c) = players_session(o)?;
+    let reply = which.ids().1;
+    let get = |s: &mut Session| -> Result<Vec<String>, String> {
+        s.send_messages(&[which.get_message()])
+            .map_err(|e| e.to_string())?;
+        await_id(s, &c, reply, |p| Some(parse_text(p)))
+    };
+    let before = get(&mut s)?;
+    let Some(text) = new else {
+        s.close();
+        for l in &before {
+            println!("{l}");
+        }
+        return Ok(());
+    };
+    let text = text.trim_end_matches(['\n', '\r']).to_string();
+    s.send_messages(&[which.set_message(&text)])
+        .map_err(|e| e.to_string())?;
+    let after = get(&mut s)?;
+    s.close();
+    for l in &after {
+        println!("{l}");
+    }
+    eprintln!("{} line(s) before, {} after", before.len(), after.len());
+    let want: Vec<String> = text.lines().map(str::to_string).collect();
+    if normalized(&after) != normalized(&want) {
+        return Err("the server read back something other than what was sent".into());
+    }
+    Ok(())
+}
+
+/// Get, and with `--set-file` set and read back: the server flags.
+fn cmd_server_flags(o: &Opts) -> Result<(), String> {
+    let new = set_file_lines(o)?;
+    let set = match &new {
+        Some(text) => {
+            let lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+            Some((flags_set(&lines)?, lines))
+        }
+        None => None,
+    };
+    let (mut s, c) = players_session(o)?;
+    let get = |s: &mut Session| -> Result<Vec<String>, String> {
+        s.send_messages(&[flags_get()]).map_err(|e| e.to_string())?;
+        await_id(s, &c, server_plo::RC_SERVERFLAGSGET, parse_flags)
+    };
+    let before = get(&mut s)?;
+    let Some((msg, want)) = set else {
+        s.close();
+        for f in &before {
+            println!("{f}");
+        }
+        return Ok(());
+    };
+    s.send_messages(&[msg]).map_err(|e| e.to_string())?;
+    let after = get(&mut s)?;
+    s.close();
+    for f in &after {
+        println!("{f}");
+    }
+    eprintln!("{} flag(s) before, {} after", before.len(), after.len());
+    // The server may keep flags in its own order.
+    let mut a = normalized(&after);
+    let mut w = normalized(&want);
+    a.sort();
+    w.sort();
+    if a != w {
+        return Err("the server read back other flags than were sent".into());
+    }
+    Ok(())
 }
 
 /// Log in and let the player list arrive, for a `players` action.
@@ -1960,6 +2086,9 @@ fn main() -> ExitCode {
         ["accounts", "delete", account] => cmd_accounts_delete(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
+        ["server", "options"] => cmd_server_text(&o, ServerText::Options),
+        ["server", "folders"] => cmd_server_text(&o, ServerText::Folders),
+        ["server", "flags"] => cmd_server_flags(&o),
         ["files", "ls"] => cmd_files_ls(&o, ""),
         ["files", "ls", dir] => cmd_files_ls(&o, dir),
         ["files", "get", path] => cmd_files_get(&o, path),

@@ -367,3 +367,19 @@ ids are how a bigger file would travel once a lab run shows their layout.
 Paths are relative, `/`-separated. `..`, a leading `/`, a backslash and a
 colon are refused. A trailing `/` is kept. A path longer than 223 bytes is
 refused: a put name is one `GCHAR`, which cannot say more.
+
+## Server options, folder config, server flags (stage 4)
+
+All **check**: no real RC was captured getting or setting these. Ids 51 to
+54 meant account actions in RC 1.33; these are the meanings from the
+2002/05/02 RC on.
+
+| What | Get | Reply | Set | Payload |
+|---|---|---|---|---|
+| Server options | 51 | 76 | 52 | Tokenized text, one item per line, as for the comments in id 63. The get has no payload. |
+| Folder config | 53 | 77 | 54 | The same. |
+| Server flags | 68 | 61 | 69 | `GSHORT` count, then each flag (`name=value`) as a `GSTRING`. |
+
+`seihai-rc server options|folders|flags --set-file PATH` reads the value,
+sends the set, reads it again, and fails if what came back differs from
+what was sent (blank lines and trailing spaces aside; flags in any order).
