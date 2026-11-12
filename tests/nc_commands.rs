@@ -539,12 +539,11 @@ fn class_list_get_set_and_delete() {
     assert_eq!(stdout(&output), "sent class Guard\n");
     handle.join().unwrap();
 
-    let mut name = Vec::new();
-    push_gstring(&mut name, b"Guard");
+    // 119 and 188 carry the bare class name (seihai-gserver-v2, lab run 2026-11-12).
     let (addr, handle) = fake_nc(NcPlan::Reply {
         id: NC_CLASS_DELETE,
-        payload: name.clone(),
-        reply: vec![message(NC_CLASS_DELETE_NOTIFY, &name)],
+        payload: b"Guard".to_vec(),
+        reply: vec![message(NC_CLASS_DELETE_NOTIFY, b"Guard")],
     });
     let output = cli(&[
         "nc",
@@ -561,13 +560,15 @@ fn class_list_get_set_and_delete() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "deleted Guard\n");
-    assert_eq!(handle.join().unwrap()[0].payload, name);
+    assert_eq!(stdout(&output), "deleted Guard
+");
+    assert_eq!(handle.join().unwrap()[0].payload, b"Guard");
 
+    // No 188 (the fork sends none for a class it does not have): a failure.
     let (addr, handle) = fake_nc(NcPlan::Reply {
         id: NC_CLASS_DELETE,
-        payload: name,
-        reply: vec![message(NC_CLASS_DELETE_NOTIFY, b"Guard")],
+        payload: b"Guard".to_vec(),
+        reply: vec![message(74, b"error: Guard does not exist on this server!")],
     });
     let output = cli(&[
         "nc",
@@ -585,7 +586,7 @@ fn class_list_get_set_and_delete() {
     ]);
     assert!(!output.status.success(), "{}", stdout(&output));
     let err = stderr(&output);
-    assert!(err.contains("bare class name"), "{err}");
+    assert!(err.contains("only when the class existed"), "{err}");
     handle.join().unwrap();
 }
 
@@ -616,7 +617,9 @@ fn weapon_list_get_set_and_delete() {
     let get = weapon_get_message("sword").unwrap();
     let mut script = Vec::new();
     push_gstring(&mut script, b"sword");
+    script.push(gchar(0));
     push_gstring(&mut script, b"sword.png");
+    script.push(gchar(1));
     push_gshort(&mut script, 7);
     script.extend_from_slice(b"return;");
     let (addr, handle) = fake_nc(NcPlan::Reply {

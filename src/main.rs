@@ -1966,7 +1966,7 @@ fn cmd_nc_class_delete(o: &Opts, name: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "no class delete (id 188) for {name:?} arrived; a bare class name is not read. Saw {}",
+            "no class delete (id 188) for {name:?} arrived; the server answers it only when the class existed. Saw {}",
             seen(&events)
         ))
     }
