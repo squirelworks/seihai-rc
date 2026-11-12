@@ -560,8 +560,11 @@ fn class_list_get_set_and_delete() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "deleted Guard
-");
+    assert_eq!(
+        stdout(&output),
+        "deleted Guard
+"
+    );
     assert_eq!(handle.join().unwrap()[0].payload, b"Guard");
 
     // No 188 (the fork sends none for a class it does not have): a failure.

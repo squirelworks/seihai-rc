@@ -219,7 +219,10 @@ pub fn class_set_message(name: &str, script: &str) -> Result<Vec<u8>, NcError> {
 /// seihai-gserver-v2 reads it this way (lab run 2026-11-12); a `GSTRING`
 /// name made it look for a class whose name starts with the length byte.
 pub fn class_delete_message(name: &str) -> Result<Vec<u8>, NcError> {
-    Ok(message(NC_CLASS_DELETE, &gstring_bytes("class name", name)?))
+    Ok(message(
+        NC_CLASS_DELETE,
+        &gstring_bytes("class name", name)?,
+    ))
 }
 
 /// Id 188: the class name as the rest of the line (seihai-gserver-v2,
