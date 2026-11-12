@@ -5,7 +5,8 @@
 //! message, disconnect, warp). NPC Control logs in on its own socket, finds that socket
 //! from the game server, and lists NPCs, classes and weapons. [`files`] is
 //! the file link a live level editor calls (list a directory, fetch a file,
-//! send a file). The plan is in
+//! send a file). [`server`] reads and sets the server options, folder
+//! config and server flags. The plan is in
 //! `docs/PLAN.md`; the rules are in `AGENTS.md`; the protocol as this crate
 //! speaks it is in `docs/PROTOCOL.md`.
 
@@ -16,4 +17,5 @@ pub mod listserver;
 pub mod nc;
 pub mod players;
 pub mod rc;
+pub mod server;
 pub mod wire;

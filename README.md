@@ -74,6 +74,10 @@ seihai-rc files get world/onlinestartlocal.nw --out start.nw --server 127.0.0.1:
 seihai-rc files put start.nw world/onlinestartlocal.nw --server 127.0.0.1:14802 --account myrc
 seihai-rc files rm world/old.nw --yes --server 127.0.0.1:14802 --account myrc
 
+# Server options, folder config and flags; --set-file replaces and reads back
+seihai-rc server options --server 127.0.0.1:14802 --account myrc
+seihai-rc server flags --set-file flags.txt --server 127.0.0.1:14802 --account myrc
+
 # Log in and print the RC chat and joins for 30 seconds
 seihai-rc login --server 127.0.0.1:14802 --account myrc --nick "My RC" --for 30
 

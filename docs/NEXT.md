@@ -146,7 +146,16 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       tests. No real client.
 - [ ] Capture 96, 97, 98 and 160 from a real 2.22 RC against the fork and
       fix the layouts if they differ (lab).
-- [ ] Server options, folder config, flags, large-file packets (155/156).
+- [x] `server options|folders|flags [--set-file PATH]`: get 51/53/68,
+      replies 76/77/61, set 52/54/69. Options and folder config as
+      tokenized text, flags as a count and one `GSTRING` each, all
+      **check** (no real RC captured). A set reads the value back, prints
+      the line counts before and after, and fails if the server kept
+      something else. Evidence: `tests/server_cli.rs` (fake gserver) and
+      unit tests. No real client.
+- [ ] Capture 51 to 54 and 68/69 from a real 2.22 RC against the fork and
+      fix the layouts if they differ (lab).
+- [ ] Large-file packets (155/156).
 
 ## Stage 5: NPC Control
 
