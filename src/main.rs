@@ -7,6 +7,9 @@ use seihai_rc::accounts::{
     account_add, account_delete, account_get, account_list, account_set, parse_account,
     parse_account_list, plo as accounts_plo, Account,
 };
+use seihai_rc::files::{
+    delete_message, folder_delete_message, move_message, rename_message, split_path, FileError,
+};
 use seihai_rc::listserver::{decode_server_key, fetch_rc_list, fetch_rc_list_secure, pick};
 use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_delete_message,
@@ -48,6 +51,13 @@ USAGE:
   seihai-rc accounts set ACCOUNT [FIELDS] (--server ... | --listserver ... --pick ...)
   seihai-rc accounts add ACCOUNT --new-password-env VAR [FIELDS] (--server ...)
   seihai-rc accounts delete ACCOUNT --yes (--server ... | --listserver ... --pick ...)
+  seihai-rc files ls [DIR] (--server ... | --listserver ... --pick ...)
+  seihai-rc files get PATH [--out FILE] (--server ... | ...)
+  seihai-rc files put LOCAL PATH (--server ... | ...)
+  seihai-rc files mv PATH FOLDER (--server ... | ...)
+  seihai-rc files rename PATH NEWNAME (--server ... | ...)
+  seihai-rc files rm PATH --yes (--server ... | ...)
+  seihai-rc files rmdir FOLDER --yes (--server ... | ...)
   seihai-rc nc discover --server HOST:PORT --account NAME [--settle MS] [options]
   seihai-rc nc login --server HOST:PORT --account NAME [--for SECS] [options]
   seihai-rc nc npcs (--server HOST:PORT | --discover HOST:PORT) --account NAME
@@ -116,6 +126,20 @@ USAGE:
   accounts delete
                 Delete an account (id 71), then list it to check it is
                 gone. Needs --yes, as it cannot be undone.
+  files ls      List the files in DIR (id 90, reply 66). Default: the
+                folder the server starts in.
+  files get     Fetch PATH (id 92, file 102) to --out FILE, or to stdout.
+  files put     Send LOCAL as PATH (id 93), then list to check it is there.
+                Files are up to 60 KiB.
+  files mv      Move PATH into FOLDER (id 96), then list both folders.
+  files rename  Rename PATH to NEWNAME in the same folder (id 98), then list.
+  files rm      Delete PATH (id 97), then list. Needs --yes.
+  files rmdir   Delete FOLDER (id 160), then check it no longer lists.
+                Needs --yes.
+                Each command lists PATH's folder first, as the server
+                names a file by the folder from the last list. The layouts
+                of 96, 97, 98 and 160 are not captured from a real RC yet;
+                the server's lines are printed and the list is the check.
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -173,6 +197,7 @@ OPTIONS:
                        and password go sealed. Needs --server-key.
   --server-key KEY     The listserver's Ed25519 public key, unpadded
                        base64. The password is not sent if it does not match.
+  --out FILE           files get: write the file here (default stdout).
   --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
   --json               players list and rcs list: one JSON array.
   -v, --verbose        Also show the ids of messages not printed as text.
@@ -213,6 +238,7 @@ struct Opts {
     new_password_env: Option<String>,
     yes: bool,
     server_key: Option<String>,
+    out: Option<String>,
     script_flag: bool,
     secure_login: bool,
     tsv: bool,
@@ -269,6 +295,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--where" => o.where_ = Some(val!(&a)),
             "--new-password-env" => o.new_password_env = Some(val!(&a)),
             "--yes" => o.yes = true,
+            "--out" => o.out = Some(val!(&a)),
             "--server-key" => o.server_key = Some(val!(&a)),
             "--secure-login" => o.secure_login = true,
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
@@ -636,6 +663,156 @@ fn cmd_rcs_list(o: &Opts) -> Result<(), String> {
     }
     s.close();
     Ok(())
+}
+
+fn cmd_files_ls(o: &Opts, dir: &str) -> Result<(), String> {
+    let (mut s, c) = players_session(o)?;
+    let names = s.list_dir(dir, c.timeout).map_err(|e| e.to_string())?;
+    s.close();
+    for n in names {
+        println!("{n}");
+    }
+    Ok(())
+}
+
+fn cmd_files_get(o: &Opts, path: &str) -> Result<(), String> {
+    let (folder, name) = split_path(path);
+    let (mut s, c) = players_session(o)?;
+    s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
+    let data = s.get_file(name, c.timeout).map_err(|e| e.to_string())?;
+    s.close();
+    match &o.out {
+        Some(out) => {
+            std::fs::write(out, &data).map_err(|e| format!("{out}: {e}"))?;
+            eprintln!("wrote {} bytes to {out}", data.len());
+        }
+        None => {
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(&data)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// List `folder` and say whether `name` is in it.
+fn listed(s: &mut Session, c: &Common, folder: &str, name: &str) -> Result<bool, String> {
+    let names = s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
+    Ok(names.iter().any(|n| n == name))
+}
+
+fn cmd_files_put(o: &Opts, local: &str, path: &str) -> Result<(), String> {
+    let data = std::fs::read(local).map_err(|e| format!("{local}: {e}"))?;
+    let (folder, name) = split_path(path);
+    let (mut s, c) = players_session(o)?;
+    s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
+    s.put_file(name, &data, c.timeout)
+        .map_err(|e| e.to_string())?;
+    let there = listed(&mut s, &c, folder, name)?;
+    s.close();
+    if !there {
+        return Err(format!("the server answered, but {path} is not listed"));
+    }
+    println!("sent {} bytes as {path}", data.len());
+    Ok(())
+}
+
+/// Send one file action and print the server's id 67 lines.
+fn file_action(s: &mut Session, o: &Opts, c: &Common, msg: Vec<u8>) -> Result<(), String> {
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    let lines = s
+        .file_action(msg, quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    for l in lines {
+        println!("[server] {l}");
+    }
+    Ok(())
+}
+
+fn cmd_files_mv(o: &Opts, path: &str, to: &str) -> Result<(), String> {
+    let (folder, name) = split_path(path);
+    let msg = move_message(name, to).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    if !listed(&mut s, &c, folder, name)? {
+        s.close();
+        return Err(format!("{path} is not listed"));
+    }
+    file_action(&mut s, o, &c, msg)?;
+    let still = listed(&mut s, &c, folder, name)?;
+    let moved = listed(&mut s, &c, to, name)?;
+    s.close();
+    if still || !moved {
+        return Err(format!(
+            "{path} was not moved (in {folder:?}: {still}, in {to:?}: {moved})"
+        ));
+    }
+    println!("moved {path} to {to}");
+    Ok(())
+}
+
+fn cmd_files_rename(o: &Opts, path: &str, new: &str) -> Result<(), String> {
+    let (folder, name) = split_path(path);
+    let msg = rename_message(name, new).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    if !listed(&mut s, &c, folder, name)? {
+        s.close();
+        return Err(format!("{path} is not listed"));
+    }
+    file_action(&mut s, o, &c, msg)?;
+    let names = s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
+    s.close();
+    if names.iter().any(|n| n == name) || !names.iter().any(|n| n == new) {
+        return Err(format!("{path} was not renamed to {new}"));
+    }
+    println!("renamed {path} to {folder}{new}");
+    Ok(())
+}
+
+fn cmd_files_rm(o: &Opts, path: &str) -> Result<(), String> {
+    if !o.yes {
+        return Err("files rm cannot be undone; add --yes".into());
+    }
+    let (folder, name) = split_path(path);
+    let msg = delete_message(name).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    if !listed(&mut s, &c, folder, name)? {
+        s.close();
+        return Err(format!("{path} is not listed"));
+    }
+    file_action(&mut s, o, &c, msg)?;
+    let still = listed(&mut s, &c, folder, name)?;
+    s.close();
+    if still {
+        return Err(format!("{path} is still listed"));
+    }
+    println!("deleted {path}");
+    Ok(())
+}
+
+fn cmd_files_rmdir(o: &Opts, folder: &str) -> Result<(), String> {
+    if !o.yes {
+        return Err("files rmdir cannot be undone; add --yes".into());
+    }
+    let msg = folder_delete_message(folder).map_err(|e| e.to_string())?;
+    let (mut s, c) = players_session(o)?;
+    s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
+    file_action(&mut s, o, &c, msg)?;
+    let after = s.list_dir(folder, c.timeout);
+    s.close();
+    match after {
+        Err(FileError::Refused(why)) => {
+            println!("deleted folder {folder} (it no longer lists: {why})");
+            Ok(())
+        }
+        // The fork does not answer a list of a folder the account cannot open.
+        Err(FileError::Timeout) => {
+            println!("deleted folder {folder} (no answer when listed again)");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+        Ok(_) => Err(format!("{folder} still lists after the delete")),
+    }
 }
 
 /// Log in and let the player list arrive, for a `players` action.
@@ -1783,6 +1960,14 @@ fn main() -> ExitCode {
         ["accounts", "delete", account] => cmd_accounts_delete(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
+        ["files", "ls"] => cmd_files_ls(&o, ""),
+        ["files", "ls", dir] => cmd_files_ls(&o, dir),
+        ["files", "get", path] => cmd_files_get(&o, path),
+        ["files", "put", local, path] => cmd_files_put(&o, local, path),
+        ["files", "mv", path, folder] => cmd_files_mv(&o, path, folder),
+        ["files", "rename", path, name] => cmd_files_rename(&o, path, name),
+        ["files", "rm", path] => cmd_files_rm(&o, path),
+        ["files", "rmdir", folder] => cmd_files_rmdir(&o, folder),
         ["nc", "login"] => cmd_nc_login(&o),
         ["nc", "discover"] => cmd_nc_discover(&o),
         ["nc", "npcs"] | ["nc", "npc", "list"] => cmd_nc_npcs(&o),

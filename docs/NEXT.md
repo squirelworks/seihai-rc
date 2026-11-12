@@ -136,8 +136,17 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       (`docs/lab/2026-11-01-file-widths.md`, `docs/PROTOCOL.md`). Evidence:
       `tests/file_link.rs`, and one loopback run against the lab fork
       (`docs/lab/2026-11-07-file-wire.md`). No real client.
-- [ ] Server options, folder config, flags, move / delete / rename, folder
-      delete (160), large-file packets (155/156).
+- [x] `files ls|get|put|mv|rename|rm|rmdir` command line. Move (96),
+      delete (97), rename (98) and folder delete (160) are sent with the
+      layouts in `docs/PROTOCOL.md`, all **check**: no real RC was captured
+      doing them. Each command lists the folder first (the fork names a file
+      by the folder from the last list), prints the server's id 67 lines,
+      and lists again to see whether the change happened. `rm` and `rmdir`
+      need `--yes`. Evidence: `tests/files_cli.rs` (fake gserver) and unit
+      tests. No real client.
+- [ ] Capture 96, 97, 98 and 160 from a real 2.22 RC against the fork and
+      fix the layouts if they differ (lab).
+- [ ] Server options, folder config, flags, large-file packets (155/156).
 
 ## Stage 5: NPC Control
 

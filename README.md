@@ -23,9 +23,11 @@ separate NPC-server socket (type 3, plain zlib) when you already know its
 address. NPC Control can also find the NPC-server from the game server and
 then list, get, set and delete NPCs, classes and weapons, including class
 delete. `servers --secure-login` asks the listserver for the RC list with
-the account sealed. A live level
+the account sealed. `files ls/get/put/mv/rename/rm/rmdir` works
+on the world's files; move, rename and the deletes are checked by listing
+again, as their layouts are not captured from a real RC yet. A live level
 editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
-session; there is no file window in this slice. The plan is in
+session. The plan is in
 [docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
 [docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the ordered to-do list in
@@ -65,6 +67,12 @@ seihai-rc accounts list "lab%" --server 127.0.0.1:14802 --account myrc
 seihai-rc accounts set test1 --email test1@example.invalid --server 127.0.0.1:14802 --account myrc
 seihai-rc players kick bob --server 127.0.0.1:14802 --account myrc
 seihai-rc players warp alice cave.nw 30.5 12 --server 127.0.0.1:14802 --account myrc
+
+# Files: the folder is listed first, then the file is named in it
+seihai-rc files ls world/ --server 127.0.0.1:14802 --account myrc
+seihai-rc files get world/onlinestartlocal.nw --out start.nw --server 127.0.0.1:14802 --account myrc
+seihai-rc files put start.nw world/onlinestartlocal.nw --server 127.0.0.1:14802 --account myrc
+seihai-rc files rm world/old.nw --yes --server 127.0.0.1:14802 --account myrc
 
 # Log in and print the RC chat and joins for 30 seconds
 seihai-rc login --server 127.0.0.1:14802 --account myrc --nick "My RC" --for 30

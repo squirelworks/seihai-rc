@@ -33,7 +33,22 @@
 //!   field. The fork answers id 67, `Uploaded file ` and the name. Any other
 //!   id 67 is a refusal.
 //!
-//! Not sent: 89, 91, 96, 97, 98, 155, 156, 160. A file over [`MAX_FILE_BYTES`]
+//! - Move, id [`pli::RC_FILEBROWSER_MOVE`] (96): a `GSTRING` file name in the
+//!   folder from the last list, then the target folder as the rest of the
+//!   line. **check**
+//! - Delete, id [`pli::RC_FILEBROWSER_DELETE`] (97): the file name in the
+//!   folder from the last list, as the rest of the line. **check**
+//! - Rename, id [`pli::RC_FILEBROWSER_RENAME`] (98): two `GSTRING`s, the old
+//!   and the new name, both in the folder from the last list. **check**
+//! - Folder delete, id [`pli::RC_FOLDERDELETE`] (160): the folder as the rest
+//!   of the line. **check**
+//!
+//! The four layouts above are not captured from a real RC yet. The server's
+//! answer to them is not relied on: [`Session::file_action`] returns the id
+//! 67 lines it sends, and the command line lists the folder again to see
+//! whether the change happened.
+//!
+//! Not sent: 89, 91, 155, 156. A file over [`MAX_FILE_BYTES`]
 //! is refused. One frame length is a `u16`, and the large-file ids are how a
 //! bigger file would travel once a lab run shows their layout.
 
@@ -63,7 +78,8 @@ pub const PLO_FILE: u8 = 102;
 /// and for zlib growing a file that does not compress.
 pub const MAX_FILE_BYTES: usize = 60 * 1024;
 
-/// Client to server file-browser ids. Only CD, DOWN and UP are sent.
+/// Client to server file-browser ids. START, END and the large-file ids are
+/// not sent.
 pub mod pli {
     /// Not sent. Payload unchecked.
     pub const RC_FILEBROWSER_START: u8 = 89;
@@ -75,17 +91,17 @@ pub mod pli {
     pub const RC_FILEBROWSER_DOWN: u8 = 92;
     /// Send a file. The message sits inside [`super::PLI_RAWDATA`].
     pub const RC_FILEBROWSER_UP: u8 = 93;
-    /// Not sent. Payload unchecked.
+    /// Move a file to another folder. See [`super::move_message`]. **check**
     pub const RC_FILEBROWSER_MOVE: u8 = 96;
-    /// Not sent. Payload unchecked.
+    /// Delete a file. See [`super::delete_message`]. **check**
     pub const RC_FILEBROWSER_DELETE: u8 = 97;
-    /// Not sent. Payload unchecked.
+    /// Rename a file. See [`super::rename_message`]. **check**
     pub const RC_FILEBROWSER_RENAME: u8 = 98;
     /// Not sent. Payload unchecked. For a file that does not fit in one frame.
     pub const RC_LARGEFILESTART: u8 = 155;
     /// Not sent. Payload unchecked.
     pub const RC_LARGEFILEEND: u8 = 156;
-    /// Not sent. Payload unchecked.
+    /// Delete a folder. See [`super::folder_delete_message`]. **check**
     pub const RC_FOLDERDELETE: u8 = 160;
 }
 
@@ -254,6 +270,53 @@ pub fn upload_body(path: &str, data: &[u8]) -> Result<Vec<u8>, FileError> {
     Ok(raw_block(PLI_RAWDATA, &inner))
 }
 
+/// A bare file name: one path segment, no `/`.
+fn name_bytes(name: &str) -> Result<Vec<u8>, FileError> {
+    if name.contains('/') {
+        return Err(FileError::InvalidPath(format!(
+            "{name}: give a name in the listed folder, not a path"
+        )));
+    }
+    path_bytes(name, false)
+}
+
+/// Move: `GSTRING` name, then the target folder as the rest of the line.
+/// **check**
+pub fn move_message(name: &str, to_folder: &str) -> Result<Vec<u8>, FileError> {
+    let mut p = Vec::new();
+    push_gstring(&mut p, &name_bytes(name)?);
+    p.extend(path_bytes(to_folder, true)?);
+    Ok(message(pli::RC_FILEBROWSER_MOVE, &p))
+}
+
+/// Delete: the name as the rest of the line. **check**
+pub fn delete_message(name: &str) -> Result<Vec<u8>, FileError> {
+    Ok(message(pli::RC_FILEBROWSER_DELETE, &name_bytes(name)?))
+}
+
+/// Rename: `GSTRING` old name, `GSTRING` new name. **check**
+pub fn rename_message(old: &str, new: &str) -> Result<Vec<u8>, FileError> {
+    let mut p = Vec::new();
+    push_gstring(&mut p, &name_bytes(old)?);
+    push_gstring(&mut p, &name_bytes(new)?);
+    Ok(message(pli::RC_FILEBROWSER_RENAME, &p))
+}
+
+/// Folder delete: the folder as the rest of the line. **check**
+pub fn folder_delete_message(folder: &str) -> Result<Vec<u8>, FileError> {
+    Ok(message(pli::RC_FOLDERDELETE, &path_bytes(folder, false)?))
+}
+
+/// `("world/", "a.nw")` for `world/a.nw`, `("", "a.nw")` for `a.nw`. The
+/// fork joins a file name to the folder from the last list, so a command
+/// lists the folder first and then names the file.
+pub fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(i) => (&path[..=i], &path[i + 1..]),
+        None => ("", path),
+    }
+}
+
 /// File names from a directory payload (id 66).
 ///
 /// The folder name is skipped. A length that runs past the payload, or a
@@ -407,6 +470,36 @@ impl Session {
         })
     }
 
+    /// Send one move, delete, rename or folder-delete message, then read
+    /// until nothing has come for `quiet` (or `deadline`). Returns the id 67
+    /// lines the server sent; other events stay queued. What a successful
+    /// action answers is not known yet (**check**), so the caller lists the
+    /// folder again to see the result.
+    pub fn file_action(
+        &mut self,
+        msg: Vec<u8>,
+        quiet: Duration,
+        deadline: Instant,
+    ) -> Result<Vec<String>, FileError> {
+        self.link.send(&[msg])?;
+        let events = self.settle(quiet, deadline)?;
+        let mut lines = Vec::new();
+        let mut keep = Vec::new();
+        for ev in events {
+            match ev {
+                Event::Other(id, p) if id == plo::RC_FILEBROWSER_MESSAGE => lines.push(text(&p)),
+                // A directory the server sends by itself after the change is
+                // not needed: the caller lists again.
+                Event::Other(id, _) if id == plo::RC_FILEBROWSER_DIR => {}
+                Event::Disconnect(why) => return Err(FileError::Refused(why)),
+                other => keep.push(other),
+            }
+        }
+        keep.append(&mut self.pending);
+        self.pending = keep;
+        Ok(lines)
+    }
+
     /// Send `data` as `path`, and wait until the server answers.
     ///
     /// A file over [`MAX_FILE_BYTES`] is refused and nothing is sent. Id 67
@@ -451,6 +544,29 @@ mod tests {
             down_message("world/onlinestartlocal.nw").unwrap(),
             b"|world/onlinestartlocal.nw"
         );
+    }
+
+    #[test]
+    fn move_delete_rename_and_folder_delete_bytes() {
+        // 96: GSTRING name, then the folder as the rest of the line.
+        assert_eq!(move_message("a.nw", "old/").unwrap(), b"\x80$a.nwold/");
+        // 97: the name as the rest of the line.
+        assert_eq!(delete_message("a.nw").unwrap(), b"\x81a.nw");
+        // 98: two GSTRINGs.
+        assert_eq!(rename_message("a.nw", "b.nw").unwrap(), b"\x82$a.nw$b.nw");
+        // 160: the folder as the rest of the line.
+        assert_eq!(folder_delete_message("old/").unwrap(), b"\xc0old/");
+        assert!(delete_message("world/a.nw").is_err());
+        assert!(rename_message("a.nw", "../b.nw").is_err());
+        assert!(move_message("a.nw", "../x").is_err());
+        assert!(folder_delete_message("").is_err());
+    }
+
+    #[test]
+    fn split_path_keeps_the_folder_slash() {
+        assert_eq!(split_path("world/a.nw"), ("world/", "a.nw"));
+        assert_eq!(split_path("a.nw"), ("", "a.nw"));
+        assert_eq!(split_path("w/x/a.nw"), ("w/x/", "a.nw"));
     }
 
     #[test]

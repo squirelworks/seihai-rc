@@ -348,9 +348,19 @@ still in front of the file, and the fork answered id 67, `Uploaded file rc-probe
 | Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. |
 | Stored | 67 `RC_FILEBROWSER_MESSAGE` | `Uploaded file ` and the name. Any other id 67 is a refusal. |
 
+| Move | 96 `RC_FILEBROWSER_MOVE` | **check** `GSTRING` file name in the folder from the last list, then the target folder as the rest of the line. |
+| Delete | 97 `RC_FILEBROWSER_DELETE` | **check** The file name in the folder from the last list, the rest of the line. |
+| Rename | 98 `RC_FILEBROWSER_RENAME` | **check** `GSTRING` old name, `GSTRING` new name, both in the folder from the last list. |
+| Folder delete | 160 `RC_FOLDERDELETE` | **check** The folder, the rest of the line. |
+
+The four **check** rows are not captured from a real RC. What the server
+answers to them is not relied on either: `seihai-rc files mv|rename|rm|rmdir`
+prints any id 67 lines and lists the folder again to see the result. A
+list of a folder that is gone gets a refusal, or no answer from the fork.
+
 Id 65 `RC_FILEBROWSER_DIRLIST` is the reply to id 89 `START`, which this
-client does not send. Not sent, layouts unknown: 91 `END`, 96 move, 97
-delete, 98 rename, 155/156 large file, 160 folder delete. A file longer
+client does not send. Not sent, layouts unknown: 91 `END`, 155/156 large
+file. A file longer
 than 60 KiB is refused. One frame's length is a `u16`, and those large-file
 ids are how a bigger file would travel once a lab run shows their layout.
 
