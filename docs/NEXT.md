@@ -46,7 +46,7 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
 | Rights | `PLI_RC_PLAYERRIGHTSGET` (83) / `SET` (84) | `PLO_RC_PLAYERRIGHTSGET` (62) |
 | Comments | `PLI_RC_PLAYERCOMMENTSGET` (85) / `SET` (86) | `PLO_RC_PLAYERCOMMENTSGET` (63) |
 | Local ban | `PLI_RC_PLAYERBANGET` (87) / `SET` (88) | `PLO_RC_PLAYERBANGET` (64) |
-| List RCs | `PLI_RC_LISTRCS` (65) | (**check**) |
+| List RCs | from the player list (65 is never sent) | |
 
 Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 `players admin-pm ID TEXT` (private admin message),
@@ -89,9 +89,11 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
       with a real 2.22 RC). `seihai-rc` has not been re-run against it.
-- [ ] List RCs (65), moved to v0.2.0 (owner's call, 2026-11-12). The 2.22
-      RC (`GSERV024`) sends it from no window, so it needs a newer RC or
-      another source.
+- [ ] List RCs, moved to v0.2.0 (owner's call, 2026-11-12). No RC client
+      from 1.21 to 2.05 sends id 65 and no server answers it: RCs are listed
+      through the normal player list, where an RC is a player with an empty
+      level. So build it from `PlayerList`, with no new packet (Graal_analysis
+      RC write-up, 2026-11-12).
 
 ## Stage 3: accounts
 

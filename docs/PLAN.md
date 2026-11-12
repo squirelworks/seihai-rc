@@ -24,8 +24,9 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
    host and port), log in, show server messages and the RC chat, list players.
 2. **Mostly done (command line, 2026-11-04).** Players: list, private message,
    message all, warp, disconnect, edit props and rights, local ban. This is
-   v0.1.0. List RCs (65) moved to v0.2.0, since no RC we have sends it;
-   more prop names are still open.
+   v0.1.0. List RCs moved to v0.2.0; it comes from the player list (an RC
+   is a player with an empty level), since id 65 is never sent. More prop
+   names are still open.
 3. **Mostly done (command line, 2026-11-04).** Accounts: list with a filter,
    add, edit, delete. The byte before the ban reason in 73 is still open.
 4. Server options, folder config, server flags, file browser with upload and
