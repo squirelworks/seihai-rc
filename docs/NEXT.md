@@ -89,8 +89,9 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
       with a real 2.22 RC). `seihai-rc` has not been re-run against it.
-- [ ] List RCs (65). The 2.22 RC (`GSERV024`) sends it from no window, so
-      it needs a newer RC or another source.
+- [ ] List RCs (65), moved to v0.2.0 (owner's call, 2026-11-12). The 2.22
+      RC (`GSERV024`) sends it from no window, so it needs a newer RC or
+      another source.
 
 ## Stage 3: accounts
 
