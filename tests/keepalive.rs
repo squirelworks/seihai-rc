@@ -30,6 +30,7 @@ fn staff_login(addr: &str) -> Session {
             password: "pw".into(),
             key: 0,
             nickname: None,
+            identity: None,
         },
         Duration::from_secs(2),
     )

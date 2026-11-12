@@ -126,6 +126,7 @@ fn params(kind: RcKind) -> LoginParams {
         password: "labpw".into(),
         key: 0x35,
         nickname: Some("Lab RC".into()),
+        identity: None,
     }
 }
 
@@ -193,8 +194,9 @@ fn events_keep_server_order() {
     h.join().unwrap();
 }
 
-/// Signature, then ADDPLAYER, the same id with new props, DELPLAYER, and
-/// ADDPLAYER again. The resend is what the fork does when props change.
+/// Signature, then ADDPLAYER, the same id with new props, DELPLAYER,
+/// ADDPLAYER again, then OTHERPLPROPS with a new nickname. The resend is
+/// what the fork does when props change.
 fn fake_gserver_resend() -> (String, thread::JoinHandle<()>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap().to_string();
@@ -225,6 +227,12 @@ fn fake_gserver_resend() -> (String, thread::JoinHandle<()>) {
             &mut codec,
             &[addplayer(6, "test205", "onlinestartlocal.nw", "default")],
         );
+        thread::sleep(gap);
+        // OTHERPLPROPS (8): id 6, nickname "Ally" only. Whether the fork
+        // sends this to an RC is **check**; the RC must apply it if it does.
+        let mut p = vec![gchar(0), gchar(6), gchar(0)];
+        push_gstring(&mut p, b"Ally");
+        send_msgs(&mut s, &mut codec, &[message(8, &p)]);
         let mut rest = Vec::new();
         let _ = s.read_to_end(&mut rest);
     });
@@ -254,10 +262,11 @@ fn repeated_addplayer_is_an_update() {
             ("update", "cave.nw", "Ally"),
             ("offline", "", ""),
             ("online", "onlinestartlocal.nw", "default"),
+            ("update", "onlinestartlocal.nw", "Ally"),
         ]
     );
     assert_eq!(s.players.players[&6].level, "onlinestartlocal.nw");
-    assert_eq!(s.players.players[&6].nickname, "default");
+    assert_eq!(s.players.players[&6].nickname, "Ally");
     s.close();
     h.join().unwrap();
 }
@@ -626,6 +635,10 @@ fn fake_gserver_actions(answer_kick: bool) -> (String, thread::JoinHandle<Vec<Me
         };
         while let Some(frame) = read_raw_frame_timeout(&mut s) {
             for m in split_messages(&codec.decode(&frame).unwrap()) {
+                if m.id == 2 {
+                    // The nickname after the login; checked in the rcs tests.
+                    continue;
+                }
                 match m.id {
                     61 if answer_kick => {
                         send_msgs(&mut s, &mut codec, &[message(56, &m.payload)]);
@@ -745,6 +758,55 @@ fn rcs_list_prints_only_the_rcs_from_the_player_list() {
     let seen = h.join().unwrap();
     // Built from ADDPLAYER/DELPLAYER only: id 65 is never sent.
     assert!(seen.after.iter().all(|m| m.id != 65), "{:?}", seen.after);
+    // With no --nick the CLI sends `*account`, as real RCs always send one.
+    assert_eq!(seen.after[0].id, 2);
+    assert_eq!(seen.after[0].payload, b" &*labrc");
+}
+
+#[test]
+fn no_nick_sends_no_nickname() {
+    let (addr, h) = fake_gserver(true);
+    let (ok, _, err) = run_group("rcs", &addr, &["list", "--no-nick"]);
+    assert!(ok, "{err}");
+    let seen = h.join().unwrap();
+    assert!(seen.after.iter().all(|m| m.id != 2), "{:?}", seen.after);
+}
+
+#[test]
+fn players_list_json() {
+    let (addr, h) = fake_gserver(true);
+    let (ok, out, err) = run_group("players", &addr, &["list", "--json"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out.trim(),
+        concat!(
+            "[{\"id\":2,\"kind\":\"player\",\"account\":\"alice\",\"nickname\":\"Alice\",",
+            "\"level\":\"start.nw\",\"status\":0,\"community\":\"alice\"},",
+            "{\"id\":200,\"kind\":\"rc\",\"account\":\"staff\",\"nickname\":\"*staff\",",
+            "\"level\":\" \",\"status\":0,\"community\":\"staff\"}]"
+        )
+    );
+    h.join().unwrap();
+}
+
+#[test]
+fn json_and_tsv_together_are_refused() {
+    let (ok, _, err) = run_group("players", "127.0.0.1:1", &["list", "--json", "--tsv"]);
+    assert!(!ok);
+    assert!(err.contains("--json or --tsv"), "{err}");
+}
+
+#[test]
+fn identity_is_sent_after_the_password() {
+    let (addr, h) = fake_gserver(true);
+    let (ok, _, err) = run_group("rcs", &addr, &["list", "--identity", "win,lab"]);
+    assert!(ok, "{err}");
+    let seen = h.join().unwrap();
+    assert!(
+        seen.login.ends_with(b"%labrc%labpwwin,lab\n"),
+        "{:?}",
+        seen.login
+    );
 }
 
 #[test]

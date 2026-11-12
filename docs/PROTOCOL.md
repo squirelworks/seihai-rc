@@ -59,7 +59,19 @@ An RC's own entry is not sent to it. Other RCs are listed with a level of one
 space; seihai-rc shows them as kind `rc`.
 
 After the login the RC may send its nickname: `PLI_PLAYERPROPS` (2) + prop 0
-(GSTRING). With none, the fork shows `*account`. RC chat lines go out as
+(GSTRING). With none, the fork shows `*account`. Real RCs always send one, so
+`seihai-rc` sends `*account` when no `--nick` is given (`--no-nick` sends
+none).
+
+A type-6 login may carry more text after the password GSTRING, up to the line
+feed: an identity string. Old RCs send none. The fork reads it when present;
+what it expects in it is **check**. `seihai-rc` sends it only with
+`--identity TEXT`.
+
+`PLO_OTHERPLPROPS` (8) is GSHORT id, then props as in `ADDPLAYER`. If it comes
+for a listed id, seihai-rc applies the nickname, level, list status and
+community name it carries and shows `[update]`; reading stops at any other
+prop. Whether the fork sends 8 to an RC is **check**. RC chat lines go out as
 `PLI_RC_CHAT` (79) + text.
 
 While the session is open, seihai-rc sends id 162 with an empty body every
