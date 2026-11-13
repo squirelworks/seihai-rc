@@ -1112,6 +1112,56 @@ fn players_props_set_sends_76_and_reads_back() {
 }
 
 #[test]
+fn players_props_set_changes_flags_weapons_and_images() {
+    let (addr, h) = fake_gserver_actions(false);
+    let (ok, out, err) = run_players(
+        &addr,
+        &[
+            "props",
+            "bob",
+            "--set",
+            "sword=3,head=head5.png,level=cave.nw,kills=300",
+            "--add-flag",
+            "quest=2",
+            "--add-weapon",
+            "lantern",
+            "--remove-weapon",
+            "bow",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(err.contains("set the props for bob"), "{err}");
+    assert!(
+        out.contains("   8  sword                 3 sword1.png\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  11  head                  head5.png\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  20  level                 cave.nw\n"),
+        "{out}"
+    );
+    assert!(out.contains("  27  kills                 300\n"), "{out}");
+    assert!(out.contains("flags: 1\n  quest=2\n"), "{out}");
+    assert!(
+        out.contains("weapons: bomb, -gr_movement, lantern\n"),
+        "{out}"
+    );
+    let seen = h.join().unwrap();
+    let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [73, 76, 73]);
+}
+
+#[test]
+fn players_props_refuses_an_empty_flag_before_logging_in() {
+    let (ok, _, err) = run_players("127.0.0.1:1", &["props", "bob", "--add-flag", "=1"]);
+    assert!(!ok);
+    assert!(err.contains("--add-flag needs"), "{err}");
+}
+
+#[test]
 fn players_props_set_refuses_an_unknown_name_before_logging_in() {
     let (ok, _, err) = run_players("127.0.0.1:1", &["props", "bob", "--set", "nick=x"]);
     assert!(!ok);

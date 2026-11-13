@@ -225,6 +225,19 @@ capture adds two rules, both followed: the RC sends the flags sorted (the
 72 had `quest.done=yes, labflag=1`, the 76 `labflag=1, quest.done=yes`),
 and it sends status (18) without the paused bit (21 went back as 20).
 
+`players props --set` changes more props than the RC captures did:
+the widths come from `seihai-core`'s player prop table, the one that
+reads the captured 72s, and none of these was captured from a real RC
+setting it. Sword (8) is GCHAR power with no image up to 4, else GCHAR
+(power + 30) and a GSTRING image; shield (9) the same with 3 and 10;
+head (11) as an image is GCHAR (length + 100) and the name; colors (13)
+five GCHARs; x and y (15, 16) GCHAR half tiles; gani (10), level (20)
+and body (35) GSTRINGs; kills and deaths (27, 28) GINT3; bomb power (7)
+and magic (26) GCHAR. `sword=` or `sword-image=` alone keeps the other
+half from the 72. `--add-flag`, `--remove-flag`, `--add-weapon` and
+`--remove-weapon` change the lists 76 carries; a flag is matched by the
+name before `=`.
+
 A 76 replaces the stored flags with the ones it carries. Until
 2026-11-04 the fork's 72 always had a flag count of 0, because it dropped
 every flag when it loaded an account, so any props set through it, the

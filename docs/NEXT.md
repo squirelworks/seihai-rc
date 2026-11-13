@@ -105,8 +105,16 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       back unchanged, flags sorted and status without the paused bit, as
       the 2004 RC did; the builder rebuilds that RC's 76 byte for byte.
       Evidence: `docs/lab/2026-11-13-archived-rc-captures.md` and a unit test.
-- [ ] Props set: more names than max-hearts, hearts, gralats, arrows,
-      bombs, glove and ap; flags and weapons as options.
+- [x] Props set: more names than max-hearts, hearts, gralats, arrows,
+      bombs, glove and ap; flags and weapons as options. Now also
+      bomb-power, sword and shield (power and image apart, each keeping
+      the other half), gani, head (an image), body, colors, x, y, level,
+      magic, kills and deaths, and `--add-flag`, `--remove-flag`,
+      `--add-weapon`, `--remove-weapon`. Widths from `seihai-core`'s
+      prop table, which reads the captured 72s; a set reads back every
+      prop, flag and weapon it changed and fails if one differs.
+      Evidence: unit tests in `src/players.rs` and
+      `tests/fake_servers.rs`. No real client set the new names.
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
       with a real 2.22 RC, and with the 2004 RC on 2026-11-13).

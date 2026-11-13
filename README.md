@@ -63,6 +63,7 @@ seihai-rc players ban test1 --set on --reason "Cheating" --server 127.0.0.1:1480
 seihai-rc players rights test1 --set 513 --server 127.0.0.1:14802 --account myrc
 seihai-rc players props bob --server 127.0.0.1:14802 --account myrc
 seihai-rc players props test1 --set gralats=100,hearts=2.5 --server 127.0.0.1:14802 --account myrc
+seihai-rc players props test1 --set sword=3,level=cave.nw --add-flag quest=2 --add-weapon lantern --server 127.0.0.1:14802 --account myrc
 seihai-rc accounts list "lab%" --server 127.0.0.1:14802 --account myrc
 seihai-rc accounts set test1 --email test1@example.invalid --server 127.0.0.1:14802 --account myrc
 seihai-rc players kick bob --server 127.0.0.1:14802 --account myrc
