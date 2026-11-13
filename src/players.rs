@@ -481,70 +481,382 @@ pub const SET_PROP_IDS: [u8; 25] = [
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 18, 20, 21, 22, 23, 26, 27, 28, 29, 32, 35,
 ];
 
-/// What a props set may change, by name. Each is one GCHAR except
-/// gralats (GINT3).
-pub const PROP_EDIT_NAMES: [(&str, u8); 7] = [
-    ("max-hearts", 1),
-    ("hearts", 2),
-    ("gralats", 3),
-    ("arrows", 4),
-    ("bombs", 5),
-    ("glove", 6),
-    ("ap", 32),
+/// What a props set may change, by name, with the value it takes:
+/// `max-hearts` (whole hearts), `hearts` (halves allowed), `gralats`,
+/// `arrows`, `bombs`, `bomb-power`, `glove`, `sword` and `shield` (the
+/// power), `sword-image`, `shield-image`, `gani`, `head` (an image),
+/// `body`, `colors` (five numbers joined with `:`), `x` and `y` (tiles,
+/// halves allowed), `level`, `magic`, `kills`, `deaths` and `ap`.
+///
+/// The widths are `seihai-core`'s player prop table; only the first seven
+/// were changed by a real RC in a capture (2026-11-04). The rest follow the
+/// same table that reads the captured 72, so a value read back unchanged
+/// is the check.
+pub const PROP_EDIT_NAMES: [&str; 22] = [
+    "max-hearts",
+    "hearts",
+    "gralats",
+    "arrows",
+    "bombs",
+    "bomb-power",
+    "glove",
+    "sword",
+    "sword-image",
+    "shield",
+    "shield-image",
+    "gani",
+    "head",
+    "body",
+    "colors",
+    "x",
+    "y",
+    "level",
+    "magic",
+    "kills",
+    "deaths",
+    "ap",
 ];
 
 /// The largest value a GINT3 holds.
 const GINT3_MAX: u32 = (1 << 21) - 1;
 
-/// One change for [`props_set`], from `NAME=VALUE`. Hearts take halves
-/// (`2.5`); every other value is a whole number.
-pub fn parse_prop_edit(item: &str) -> Result<(u8, Vec<u8>), String> {
+/// Sword power at or under this goes with no image; over it, the GCHAR is
+/// the power plus [`SWORD_IMAGE_OFFSET`] and the image follows.
+const SWORD_PLAIN_MAX: u8 = 4;
+const SWORD_IMAGE_OFFSET: u8 = 30;
+const SHIELD_PLAIN_MAX: u8 = 3;
+const SHIELD_IMAGE_OFFSET: u8 = 10;
+/// Head (11) as an image is GCHAR (length + 100) and the name.
+const HEAD_IMAGE_OFFSET: u8 = 100;
+
+/// One change for a props set, from `NAME=VALUE` ([`parse_prop_edit`]).
+/// Turned into prop bytes against the props just read with
+/// [`resolve_prop_edits`], because sword and shield keep their image when
+/// only the power changes, and the other way round.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropEdit {
+    /// Replace prop `id` with these value bytes.
+    Raw(u8, Vec<u8>),
+    SwordPower(u8),
+    SwordImage(String),
+    ShieldPower(u8),
+    ShieldImage(String),
+}
+
+/// A GSTRING value: latin-1, one line, at most `max` bytes.
+fn gstring_value(name: &str, value: &str, max: usize) -> Result<Vec<u8>, String> {
+    if value.chars().any(|c| c == '\n' || c == '\r') {
+        return Err(format!("{name}: the value contains a line break"));
+    }
+    let b = latin1_bytes(value);
+    if b.len() > max {
+        return Err(format!("{name}: longer than {max} bytes"));
+    }
+    Ok(b)
+}
+
+/// Tiles with halves allowed, as one GCHAR of half tiles.
+fn half_tile_value(v: &str) -> Option<u8> {
+    let v: f32 = v.parse().ok()?;
+    let halves = v * 2.0;
+    if !halves.is_finite()
+        || halves.fract() != 0.0
+        || !(0.0..=f32::from(GCHAR_MAX)).contains(&halves)
+    {
+        return None;
+    }
+    Some(halves as u8)
+}
+
+/// One change, from `NAME=VALUE`. Hearts, `x` and `y` take halves (`2.5`);
+/// every other number is whole. See [`PROP_EDIT_NAMES`].
+pub fn parse_prop_edit(item: &str) -> Result<PropEdit, String> {
     let (name, value) = item
         .split_once('=')
         .ok_or_else(|| format!("{item}: give NAME=VALUE"))?;
     let name = name.trim();
     let value = value.trim();
-    let id = PROP_EDIT_NAMES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, id)| *id)
-        .ok_or_else(|| {
-            let names: Vec<&str> = PROP_EDIT_NAMES.iter().map(|(n, _)| *n).collect();
-            format!("{name}: not a prop this client sets ({})", names.join(", "))
-        })?;
+    if !PROP_EDIT_NAMES.contains(&name) {
+        return Err(format!(
+            "{name}: not a prop this client sets ({})",
+            PROP_EDIT_NAMES.join(", ")
+        ));
+    }
     let bad = || format!("{name}={value}: not a value this prop holds");
-    let raw = match id {
-        1 | 2 => {
+    let small = |max: u8| -> Result<u8, String> {
+        value
+            .parse::<u8>()
+            .ok()
+            .filter(|v| *v <= max)
+            .ok_or_else(bad)
+    };
+    let gint3 = || -> Result<Vec<u8>, String> {
+        let v: u32 = value.parse().map_err(|_| bad())?;
+        if v > GINT3_MAX {
+            return Err(bad());
+        }
+        let mut b = Vec::with_capacity(3);
+        push_gint3(&mut b, v);
+        Ok(b)
+    };
+    let string = |id: u8| -> Result<PropEdit, String> {
+        let b = gstring_value(name, value, usize::from(GCHAR_MAX))?;
+        let mut raw = Vec::with_capacity(1 + b.len());
+        push_gstring(&mut raw, &b);
+        Ok(PropEdit::Raw(id, raw))
+    };
+    Ok(match name {
+        "max-hearts" | "hearts" => {
             let v: f32 = value.parse().map_err(|_| bad())?;
             let halves = v * 2.0;
             if !halves.is_finite() || halves.fract() != 0.0 || !(0.0..=40.0).contains(&halves) {
                 return Err(bad());
             }
-            if id == 1 && halves.rem_euclid(2.0) != 0.0 {
+            if name == "max-hearts" {
+                // Max power is whole hearts.
+                if halves.rem_euclid(2.0) != 0.0 {
+                    return Err(bad());
+                }
+                PropEdit::Raw(1, vec![gchar((halves / 2.0) as u8)])
+            } else {
+                // Power is half hearts.
+                PropEdit::Raw(2, vec![gchar(halves as u8)])
+            }
+        }
+        "gralats" => PropEdit::Raw(3, gint3()?),
+        "arrows" => PropEdit::Raw(4, vec![gchar(small(GCHAR_MAX)?)]),
+        "bombs" => PropEdit::Raw(5, vec![gchar(small(GCHAR_MAX)?)]),
+        "glove" => PropEdit::Raw(6, vec![gchar(small(GCHAR_MAX)?)]),
+        "bomb-power" => PropEdit::Raw(7, vec![gchar(small(GCHAR_MAX)?)]),
+        "sword" => PropEdit::SwordPower(small(GCHAR_MAX - SWORD_IMAGE_OFFSET)?),
+        "shield" => PropEdit::ShieldPower(small(GCHAR_MAX - SHIELD_IMAGE_OFFSET)?),
+        "sword-image" => {
+            PropEdit::SwordImage(text(&gstring_value(name, value, usize::from(GCHAR_MAX))?))
+        }
+        "shield-image" => {
+            PropEdit::ShieldImage(text(&gstring_value(name, value, usize::from(GCHAR_MAX))?))
+        }
+        "gani" => string(10)?,
+        "head" => {
+            let b = gstring_value(name, value, usize::from(GCHAR_MAX - HEAD_IMAGE_OFFSET))?;
+            if b.is_empty() {
                 return Err(bad());
             }
-            // Max power is whole hearts; power is half hearts.
-            let n = if id == 1 { halves / 2.0 } else { halves };
-            vec![gchar(n as u8)]
+            let mut raw = vec![gchar(HEAD_IMAGE_OFFSET + b.len() as u8)];
+            raw.extend_from_slice(&b);
+            PropEdit::Raw(11, raw)
         }
-        3 => {
-            let v: u32 = value.parse().map_err(|_| bad())?;
-            if v > GINT3_MAX {
+        "colors" => {
+            let parts: Vec<&str> = value.split(':').collect();
+            if parts.len() != 5 {
+                return Err(format!("{name}: give five numbers joined with ':'"));
+            }
+            let mut raw = Vec::with_capacity(5);
+            for p in parts {
+                let v = p
+                    .trim()
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|v| *v <= GCHAR_MAX)
+                    .ok_or_else(bad)?;
+                raw.push(gchar(v));
+            }
+            PropEdit::Raw(13, raw)
+        }
+        "x" => PropEdit::Raw(15, vec![gchar(half_tile_value(value).ok_or_else(bad)?)]),
+        "y" => PropEdit::Raw(16, vec![gchar(half_tile_value(value).ok_or_else(bad)?)]),
+        "level" => {
+            if value.is_empty() {
                 return Err(bad());
             }
-            let mut b = Vec::with_capacity(3);
-            push_gint3(&mut b, v);
-            b
+            string(20)?
         }
-        _ => {
-            let v: u8 = value.parse().map_err(|_| bad())?;
-            if v > GCHAR_MAX {
-                return Err(bad());
+        "magic" => PropEdit::Raw(26, vec![gchar(small(GCHAR_MAX)?)]),
+        "kills" => PropEdit::Raw(27, gint3()?),
+        "deaths" => PropEdit::Raw(28, gint3()?),
+        "ap" => PropEdit::Raw(32, vec![gchar(small(GCHAR_MAX)?)]),
+        "body" => string(35)?,
+        _ => unreachable!("every name in PROP_EDIT_NAMES has a case"),
+    })
+}
+
+/// A sword (8) or shield (9) value read as power and image: GCHAR power
+/// with no image at or under `plain_max`, else GCHAR (power + `offset`)
+/// and a GSTRING image.
+fn split_power_image(raw: &[u8], plain_max: u8, offset: u8) -> Option<(u8, String)> {
+    let v = raw.first()?.checked_sub(0x20)?;
+    if v <= plain_max {
+        return Some((v, String::new()));
+    }
+    let power = v.checked_sub(offset)?;
+    let mut i = 1;
+    let image = read_gstring(raw, &mut i)?;
+    Some((power, text(&image)))
+}
+
+/// Sword (8) or shield (9) as its power and image (empty when it has
+/// none); `None` for another id or a value that does not read.
+pub fn power_and_image(id: u8, raw: &[u8]) -> Option<(u8, String)> {
+    match id {
+        8 => split_power_image(raw, SWORD_PLAIN_MAX, SWORD_IMAGE_OFFSET),
+        9 => split_power_image(raw, SHIELD_PLAIN_MAX, SHIELD_IMAGE_OFFSET),
+        _ => None,
+    }
+}
+
+/// Head (11) as an image name, when it is one (GCHAR length + 100).
+pub fn head_image(raw: &[u8]) -> Option<String> {
+    let v = raw.first()?.checked_sub(0x20)?;
+    let n = usize::from(v.checked_sub(HEAD_IMAGE_OFFSET)?);
+    (raw.len() == 1 + n).then(|| text(&raw[1..]))
+}
+
+fn join_power_image(
+    what: &str,
+    power: u8,
+    image: &str,
+    plain_max: u8,
+    offset: u8,
+) -> Result<Vec<u8>, String> {
+    if image.is_empty() {
+        if power > plain_max {
+            return Err(format!(
+                "{what} power {power} needs an image: the prop holds a power over \
+                 {plain_max} only with one"
+            ));
+        }
+        return Ok(vec![gchar(power)]);
+    }
+    let v = power
+        .checked_add(offset)
+        .filter(|v| *v <= GCHAR_MAX)
+        .ok_or_else(|| format!("{what} power {power} does not fit with an image"))?;
+    let mut raw = vec![gchar(v)];
+    push_gstring(&mut raw, &latin1_bytes(image));
+    Ok(raw)
+}
+
+/// Turn `edits` into the value bytes of each prop they change, against the
+/// props in `from`. Later edits of the same prop win. A sword or shield
+/// edit keeps the image (or power) that `from` has.
+pub fn resolve_prop_edits(
+    from: &PropsReply,
+    edits: &[PropEdit],
+) -> Result<Vec<(u8, Vec<u8>)>, String> {
+    let mut out: Vec<(u8, Vec<u8>)> = Vec::new();
+    for e in edits {
+        let current = |id: u8| {
+            out.iter()
+                .find(|(d, _)| *d == id)
+                .map(|(_, r)| r.clone())
+                .or_else(|| {
+                    from.props
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.raw.clone())
+                })
+        };
+        let (id, raw) = match e {
+            PropEdit::Raw(id, raw) => (*id, raw.clone()),
+            PropEdit::SwordPower(_) | PropEdit::SwordImage(_) => {
+                let (power, image) = current(8)
+                    .and_then(|r| split_power_image(&r, SWORD_PLAIN_MAX, SWORD_IMAGE_OFFSET))
+                    .unwrap_or_default();
+                let (power, image) = match e {
+                    PropEdit::SwordPower(p) => (*p, image),
+                    PropEdit::SwordImage(i) => (power, i.clone()),
+                    _ => unreachable!(),
+                };
+                (
+                    8,
+                    join_power_image("sword", power, &image, SWORD_PLAIN_MAX, SWORD_IMAGE_OFFSET)?,
+                )
             }
-            vec![gchar(v)]
+            PropEdit::ShieldPower(_) | PropEdit::ShieldImage(_) => {
+                let (power, image) = current(9)
+                    .and_then(|r| split_power_image(&r, SHIELD_PLAIN_MAX, SHIELD_IMAGE_OFFSET))
+                    .unwrap_or_default();
+                let (power, image) = match e {
+                    PropEdit::ShieldPower(p) => (*p, image),
+                    PropEdit::ShieldImage(i) => (power, i.clone()),
+                    _ => unreachable!(),
+                };
+                (
+                    9,
+                    join_power_image(
+                        "shield",
+                        power,
+                        &image,
+                        SHIELD_PLAIN_MAX,
+                        SHIELD_IMAGE_OFFSET,
+                    )?,
+                )
+            }
+        };
+        out.retain(|(d, _)| *d != id);
+        out.push((id, raw));
+    }
+    Ok(out)
+}
+
+/// The flag list after `add` and `remove`. A flag is `NAME` or
+/// `NAME=VALUE`; adding one replaces any flag of the same name, and
+/// removing `NAME` drops it whatever its value.
+pub fn edit_flags(
+    flags: &[String],
+    add: &[String],
+    remove: &[String],
+) -> Result<Vec<String>, String> {
+    let name = |f: &str| f.split_once('=').map_or(f, |(n, _)| n).to_string();
+    let mut out: Vec<String> = flags.to_vec();
+    for r in remove {
+        let n = name(r.trim());
+        if n.is_empty() {
+            return Err("--remove-flag needs a flag name".into());
         }
-    };
-    Ok((id, raw))
+        out.retain(|f| name(f) != n);
+    }
+    for a in add {
+        let a = a.trim();
+        let n = name(a);
+        if n.is_empty() {
+            return Err("--add-flag needs NAME or NAME=VALUE".into());
+        }
+        gstring_value("the flag", a, usize::from(GCHAR_MAX))?;
+        out.retain(|f| name(f) != n);
+        out.push(a.to_string());
+    }
+    if out.len() > usize::from(GSHORT_MAX) {
+        return Err("more flags than a GSHORT count holds".into());
+    }
+    Ok(out)
+}
+
+/// The weapon list after `add` and `remove`, by exact name. A weapon
+/// already held is not added twice.
+pub fn edit_weapons(
+    weapons: &[String],
+    add: &[String],
+    remove: &[String],
+) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = weapons.to_vec();
+    for r in remove {
+        out.retain(|w| w != r.trim());
+    }
+    for a in add {
+        let a = a.trim();
+        if a.is_empty() {
+            return Err("--add-weapon needs a weapon name".into());
+        }
+        gstring_value("the weapon", a, usize::from(GCHAR_MAX))?;
+        if !out.iter().any(|w| w == a) {
+            out.push(a.to_string());
+        }
+    }
+    if out.len() > usize::from(GCHAR_MAX) {
+        return Err("more weapons than a GCHAR count holds".into());
+    }
+    Ok(out)
 }
 
 fn push_gint3(out: &mut Vec<u8>, v: u32) {
@@ -899,7 +1211,8 @@ mod tests {
             ]
         );
         assert_eq!(r.weapons, ["bomb", "bow", "-gr_movement"]);
-        let set = props_set(&r, &[parse_prop_edit("gralats=7").unwrap()]).unwrap();
+        let edits = resolve_prop_edits(&r, &[parse_prop_edit("gralats=7").unwrap()]).unwrap();
+        let set = props_set(&r, &edits).unwrap();
         assert_eq!(set, hex(CAPTURED3_76));
     }
 
@@ -912,7 +1225,7 @@ mod tests {
             parse_prop_edit("max-hearts=4").unwrap(),
             parse_prop_edit("ap=60").unwrap(),
         ];
-        let msg = props_set(&r, &edits).unwrap();
+        let msg = props_set(&r, &resolve_prop_edits(&r, &edits).unwrap()).unwrap();
         let mut i = 1;
         read_gstring(&msg, &mut i).unwrap();
         read_gstring(&msg, &mut i).unwrap();
@@ -943,10 +1256,170 @@ mod tests {
         ] {
             assert!(parse_prop_edit(bad).is_err(), "{bad}");
         }
-        assert_eq!(parse_prop_edit("gralats=2097151").unwrap().1, [0x9f; 3]);
+        assert_eq!(
+            parse_prop_edit("gralats=2097151").unwrap(),
+            PropEdit::Raw(3, vec![0x9f; 3])
+        );
         let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
         r.props.retain(|p| p.id != 35);
         assert!(props_set(&r, &[]).unwrap_err().contains("35"));
+    }
+
+    /// The props block of a 76, decoded.
+    fn sent_props(msg: &[u8]) -> Vec<seihai_core::protocol::PlayerProp> {
+        let mut i = 1;
+        read_gstring(msg, &mut i).unwrap();
+        read_gstring(msg, &mut i).unwrap();
+        seihai_core::protocol::parse_player_props(&read_gstring(msg, &mut i).unwrap())
+    }
+
+    #[test]
+    fn props_set_takes_the_wider_names() {
+        let r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        let edits: Vec<PropEdit> = [
+            "bomb-power=2",
+            "gani=walk",
+            "head=head5.png",
+            "body=body2.png",
+            "colors=1:2:3:4:5",
+            "x=30.5",
+            "y=12",
+            "level=cave.nw",
+            "magic=40",
+            "kills=300",
+            "deaths=2",
+        ]
+        .iter()
+        .map(|e| parse_prop_edit(e).unwrap())
+        .collect();
+        let msg = props_set(&r, &resolve_prop_edits(&r, &edits).unwrap()).unwrap();
+        let props = sent_props(&msg);
+        // Every prop still decodes with the same table, in the RC's order.
+        let ids: Vec<u8> = props.iter().map(|p| p.id).collect();
+        assert_eq!(ids, SET_PROP_IDS);
+        let raw = |id: u8| props.iter().find(|p| p.id == id).unwrap().raw.clone();
+        assert_eq!(raw(7), [0x22]);
+        assert_eq!(raw(10), b"$walk");
+        assert_eq!(raw(11), [&[0x20 + 100 + 9][..], b"head5.png"].concat());
+        assert_eq!(raw(35), b")body2.png");
+        assert_eq!(raw(13), [0x21, 0x22, 0x23, 0x24, 0x25]);
+        assert_eq!(raw(15), [0x20 + 61]);
+        assert_eq!(raw(16), [0x20 + 24]);
+        assert_eq!(raw(20), b"'cave.nw");
+        assert_eq!(raw(26), [0x20 + 40]);
+        assert_eq!(raw(27), [0x20, 0x22, 0x20 + 44]); // 300 = 2 * 128 + 44
+        assert_eq!(raw(28), [0x20, 0x20, 0x22]);
+        // What was not edited goes back as the 72 had it.
+        let before = |id: u8| r.props.iter().find(|p| p.id == id).unwrap().raw.clone();
+        assert_eq!(raw(8), before(8));
+        assert_eq!(raw(9), before(9));
+    }
+
+    #[test]
+    fn sword_and_shield_keep_the_other_half() {
+        let r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        // The capture holds sword 1 with `sword1.png`, shield 1 with
+        // `shield1.png`.
+        let one = |e: &str| resolve_prop_edits(&r, &[parse_prop_edit(e).unwrap()]).unwrap();
+        assert_eq!(
+            one("sword=3"),
+            [(8, [&[0x20 + 33, 0x2a][..], b"sword1.png"].concat())]
+        );
+        assert_eq!(
+            one("sword-image=sword2.png"),
+            [(8, [&[0x20 + 31, 0x2a][..], b"sword2.png"].concat())]
+        );
+        assert_eq!(
+            one("shield=2"),
+            [(9, [&[0x20 + 12, 0x2b][..], b"shield1.png"].concat())]
+        );
+        // No image: the power alone, which holds up to 4 (sword) or 3 (shield).
+        let both = resolve_prop_edits(
+            &r,
+            &[
+                parse_prop_edit("sword-image=").unwrap(),
+                parse_prop_edit("sword=4").unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(both, [(8, vec![0x24])]);
+        let too_strong = resolve_prop_edits(
+            &r,
+            &[
+                parse_prop_edit("shield-image=").unwrap(),
+                parse_prop_edit("shield=4").unwrap(),
+            ],
+        );
+        assert!(too_strong.unwrap_err().contains("needs an image"));
+        // A sword image the 72 did not have starts from power 0.
+        let mut bare = r.clone();
+        bare.props.retain(|p| p.id != 8);
+        assert_eq!(
+            resolve_prop_edits(&bare, &[parse_prop_edit("sword-image=s.png").unwrap()]).unwrap(),
+            [(8, [&[0x20 + 30, 0x25][..], b"s.png"].concat())]
+        );
+    }
+
+    #[test]
+    fn wider_names_refuse_what_does_not_fit() {
+        for bad in [
+            "colors=1:2:3:4",
+            "colors=1:2:3:4:224",
+            "x=112",
+            "y=1.25",
+            "level=",
+            "head=",
+            "kills=2097152",
+            "sword=194",
+            "shield=214",
+        ] {
+            assert!(parse_prop_edit(bad).is_err(), "{bad}");
+        }
+        let long = format!("head={}", "h".repeat(124));
+        assert!(parse_prop_edit(&long).is_err());
+        assert!(parse_prop_edit(&format!("head={}", "h".repeat(123))).is_ok());
+    }
+
+    #[test]
+    fn flag_and_weapon_edits() {
+        let flags: Vec<String> = vec!["quest.done=yes".into(), "labflag=1".into()];
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            edit_flags(&flags, &s(&["labflag=2", "new"]), &s(&["quest.done"])).unwrap(),
+            s(&["labflag=2", "new"])
+        );
+        assert!(edit_flags(&flags, &s(&["=x"]), &[]).is_err());
+        assert!(edit_flags(
+            &flags,
+            &s(&["a
+b"]),
+            &[]
+        )
+        .is_err());
+        let weapons = s(&["bomb", "bow"]);
+        assert_eq!(
+            edit_weapons(&weapons, &s(&["bow", "-gr_movement"]), &s(&["bomb"])).unwrap(),
+            s(&["bow", "-gr_movement"])
+        );
+        // A 76 carries the edited lists: flags sorted, weapons in order.
+        let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
+        r.flags = edit_flags(&r.flags, &s(&["zeta", "alpha=1"]), &[]).unwrap();
+        r.weapons = edit_weapons(&r.weapons, &[], &s(&["bow"])).unwrap();
+        let msg = props_set(&r, &[]).unwrap();
+        let mut i = 1;
+        for _ in 0..3 {
+            read_gstring(&msg, &mut i).unwrap();
+        }
+        assert_eq!(&msg[i..i + 2], [0x20, 0x22]);
+        i += 2;
+        assert_eq!(read_gstring(&msg, &mut i).unwrap(), b"alpha=1");
+        assert_eq!(read_gstring(&msg, &mut i).unwrap(), b"zeta");
+        i += 2; // no chests
+        assert_eq!(msg[i], 0x22);
+        i += 1;
+        assert_eq!(read_gstring(&msg, &mut i).unwrap(), b"bomb");
+        assert_eq!(read_gstring(&msg, &mut i).unwrap(), b"-gr_movement");
+        assert_eq!(&msg[i..], [0x20]);
     }
 
     #[test]

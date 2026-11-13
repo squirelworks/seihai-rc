@@ -19,10 +19,11 @@ use seihai_rc::nc::{
     NcSession, NewNpc,
 };
 use seihai_rc::players::{
-    admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
-    parse_comments, parse_prop_edit, parse_props, parse_rights, plo as players_plo,
-    private_admin_message, private_message, prop_name, props_get, props_get_account, props_set,
-    resolve, rights_get, rights_set, warp_player, PropsReply, Rights,
+    admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, edit_flags,
+    edit_weapons, parse_ban, parse_comments, parse_prop_edit, parse_props, parse_rights,
+    plo as players_plo, private_admin_message, private_message, prop_name, props_get,
+    props_get_account, props_set, resolve, resolve_prop_edits, rights_get, rights_set, warp_player,
+    PropsReply, Rights,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -48,7 +49,7 @@ USAGE:
   seihai-rc players comments ACCOUNT [--set TEXT | --set-file PATH] (--server ... | ...)
   seihai-rc players ban ACCOUNT [--set on|off [--reason TEXT]] (--server ... | ...)
   seihai-rc players rights ACCOUNT [--set N] [--ip-range R] [--set-file PATH] (--server ...)
-  seihai-rc players props WHO [--set NAME=VALUE,...] (--server ... | --listserver ... --pick ...)
+  seihai-rc players props WHO [--set NAME=VALUE,...] [--add-flag F] [--remove-flag F] [--add-weapon W] [--remove-weapon W] (--server ... | --listserver ... --pick ...)
   seihai-rc players kick WHO (--server ... | --listserver ... --pick ...)
   seihai-rc players warp WHO LEVEL X Y (--server ... | --listserver ... --pick ...)
   seihai-rc accounts list [PATTERN] [--where COND] (--server ... | --listserver ... --pick ...)
@@ -115,7 +116,13 @@ USAGE:
                 72). WHO that is not online is read by account (id 74).
                 --set changes props (id 76) and reads them back; NAME is
                 max-hearts, hearts (halves allowed), gralats, arrows,
-                bombs, glove or ap. The rest is sent back as read.
+                bombs, bomb-power, glove, sword, sword-image, shield,
+                shield-image, gani, head (an image), body, colors (five
+                numbers joined with :), x, y (tiles, halves allowed),
+                level, magic, kills, deaths or ap. --add-flag NAME[=VALUE],
+                --remove-flag NAME, --add-weapon NAME and --remove-weapon
+                NAME change the flags and weapons; each may be repeated.
+                The rest is sent back as read.
   players kick  Disconnect a player (id 61) and wait for it to leave (56).
   players warp  Warp a player (id 82) to LEVEL at X Y, in tiles; halves
                 such as 30.5 are allowed.
@@ -261,6 +268,10 @@ struct Opts {
     image: Option<String>,
     set: Option<String>,
     set_file: Option<String>,
+    add_flag: Vec<String>,
+    remove_flag: Vec<String>,
+    add_weapon: Vec<String>,
+    remove_weapon: Vec<String>,
     reason: Option<String>,
     ip_range: Option<String>,
     email: Option<String>,
@@ -319,6 +330,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--image" => o.image = Some(val!(&a)),
             "--set" => o.set = Some(val!(&a)),
             "--set-file" => o.set_file = Some(val!(&a)),
+            "--add-flag" => o.add_flag.push(val!(&a)),
+            "--remove-flag" => o.remove_flag.push(val!(&a)),
+            "--add-weapon" => o.add_weapon.push(val!(&a)),
+            "--remove-weapon" => o.remove_weapon.push(val!(&a)),
             "--reason" => o.reason = Some(val!(&a)),
             "--ip-range" => o.ip_range = Some(val!(&a)),
             "--email" => o.email = Some(val!(&a)),
@@ -1267,6 +1282,25 @@ fn cmd_players_rights(o: &Opts, account: &str) -> Result<(), String> {
 /// A prop value for people: text when the bytes are a GSTRING that fills
 /// the value, a number for one byte or a GINT3, and escaped bytes otherwise.
 fn prop_value(id: u8, raw: &[u8]) -> String {
+    if let Some((power, image)) = seihai_rc::players::power_and_image(id, raw) {
+        return if image.is_empty() {
+            power.to_string()
+        } else {
+            format!("{power} {image}")
+        };
+    }
+    if id == 11 {
+        if let Some(image) = seihai_rc::players::head_image(raw) {
+            return image;
+        }
+    }
+    if id == 13 && raw.len() == 5 {
+        let c: Vec<String> = raw
+            .iter()
+            .map(|b| b.wrapping_sub(0x20).to_string())
+            .collect();
+        return c.join(":");
+    }
     let n = |b: &u8| u32::from(b.wrapping_sub(0x20) & 0x7F);
     let gstring = raw.len() > 1 && usize::from(raw[0].wrapping_sub(0x20)) == raw.len() - 1;
     match raw {
@@ -1364,6 +1398,13 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
     if o.set.is_some() && edits.is_empty() {
         return Err("--set needs NAME=VALUE".into());
     }
+    let list_edits = !(o.add_flag.is_empty()
+        && o.remove_flag.is_empty()
+        && o.add_weapon.is_empty()
+        && o.remove_weapon.is_empty());
+    // Refuse a bad flag or weapon before logging in.
+    edit_flags(&[], &o.add_flag, &o.remove_flag)?;
+    edit_weapons(&[], &o.add_weapon, &o.remove_weapon)?;
     let (mut s, c) = players_session(o)?;
     let digits = !who.is_empty() && who.bytes().all(|b| b.is_ascii_digit());
     let online = s
@@ -1381,13 +1422,17 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
         PropsTarget::Account(who.to_string())
     };
     let r = read_props(&mut s, &c, &target)?;
-    if edits.is_empty() {
+    if edits.is_empty() && !list_edits {
         s.close();
         print_props(&r);
         return Ok(());
     }
-    let msg = props_set(&r, &edits)?;
-    if r.flags.is_empty() {
+    let resolved = resolve_prop_edits(&r, &edits)?;
+    let mut to_send = r.clone();
+    to_send.flags = edit_flags(&r.flags, &o.add_flag, &o.remove_flag)?;
+    to_send.weapons = edit_weapons(&r.weapons, &o.add_weapon, &o.remove_weapon)?;
+    let msg = props_set(&to_send, &resolved)?;
+    if r.flags.is_empty() && o.add_flag.is_empty() {
         eprintln!(
             "note: the server sent no flags, so none go back; a server that stores flags it \
              does not send drops them on this set, as it does for the real RC"
@@ -1398,11 +1443,26 @@ fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
     s.close();
     print_props(&back);
     let mut wrong = Vec::new();
-    for (id, raw) in &edits {
+    for (id, raw) in &resolved {
         let got = back.props.iter().find(|p| p.id == *id).map(|p| &p.raw);
         if got != Some(raw) {
-            wrong.push(prop_name(*id).unwrap_or("?"));
+            wrong.push(prop_name(*id).unwrap_or("?").to_string());
         }
+    }
+    let sorted = |v: &[String]| {
+        let mut v = v.to_vec();
+        v.sort();
+        v
+    };
+    if (!o.add_flag.is_empty() || !o.remove_flag.is_empty())
+        && sorted(&back.flags) != sorted(&to_send.flags)
+    {
+        wrong.push("flags".into());
+    }
+    if (!o.add_weapon.is_empty() || !o.remove_weapon.is_empty())
+        && sorted(&back.weapons) != sorted(&to_send.weapons)
+    {
+        wrong.push("weapons".into());
     }
     if !wrong.is_empty() {
         return Err(format!(
@@ -2399,6 +2459,13 @@ mod tests {
         assert_eq!(prop_value(29, &[0x20, 0x23, 0x7b]), "475");
         assert_eq!(prop_value(1, b"#"), "3");
         assert_eq!(prop_value(13, &[0x20, 0x9f]), " \\x9f");
+        assert_eq!(prop_value(13, &[0x21, 0x22, 0x23, 0x24, 0x25]), "1:2:3:4:5");
+        assert_eq!(prop_value(8, b"?*sword1.png"), "1 sword1.png");
+        assert_eq!(prop_value(9, b"#"), "3");
+        assert_eq!(
+            prop_value(11, &[&[0x8d][..], b"head0.png"].concat()),
+            "head0.png"
+        );
     }
 
     #[test]
