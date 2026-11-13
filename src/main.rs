@@ -153,7 +153,7 @@ USAGE:
   files mv      Move PATH into FOLDER (id 96), then list both folders.
   files rename  Rename PATH to NEWNAME in the same folder (id 98), then list.
   files rm      Delete PATH (id 97), then list. Needs --yes.
-  files rmdir   Delete FOLDER (id 160), then check it no longer lists.
+  files rmdir   Delete FOLDER (id 160); the server's id 67 line says whether it went.
                 Needs --yes.
                 Each command lists PATH's folder first, as the server
                 names a file by the folder from the last list. The layouts
@@ -838,7 +838,28 @@ fn cmd_files_rmdir(o: &Opts, folder: &str) -> Result<(), String> {
     let msg = folder_delete_message(folder).map_err(|e| e.to_string())?;
     let (mut s, c) = players_session(o)?;
     s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
-    file_action(&mut s, o, &c, msg)?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    let lines = s
+        .file_action(msg, quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    for l in &lines {
+        println!("[server] {l}");
+    }
+    // The fork answers `Folder world/labdir/ has been removed.`. Listing the
+    // folder again proves nothing there: the fork still answers a list of a
+    // deleted folder the account's rights cover, with no files (seihai-rc
+    // live run, 2026-11-13). So the id 67 line decides, and any other id 67
+    // is a refusal. Only a server that sends no id 67 at all is checked by
+    // listing again.
+    if lines.iter().any(|l| l.contains("has been removed")) {
+        s.close();
+        println!("deleted folder {folder}");
+        return Ok(());
+    }
+    if !lines.is_empty() {
+        s.close();
+        return Err(format!("{folder} was not deleted: {}", lines.join(" / ")));
+    }
     let after = s.list_dir(folder, c.timeout);
     s.close();
     match after {

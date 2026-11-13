@@ -71,8 +71,13 @@ fn fake(mut world: World) -> (String, JoinHandle<(Vec<String>, World)>) {
             let body = codec.decode(&frame).unwrap();
             if body[0].wrapping_sub(0x20) == 50 {
                 // Put: raw block, id 93, GSTRING name, the bytes.
+                // The count includes the block's last line feed; the
+                // fork drops it, so a short count would cost the file's
+                // own last byte.
                 let n = read_gint3(&body[1..4]).unwrap();
-                let inner = &body[5..5 + n];
+                assert_eq!(body.len(), 5 + n);
+                assert_eq!(body[4 + n], b'\n');
+                let inner = &body[5..4 + n];
                 let mut i = 1;
                 let name = text(&read_gstring(inner, &mut i).unwrap());
                 seen.push(format!("93 {name}"));
@@ -153,8 +158,22 @@ fn fake(mut world: World) -> (String, JoinHandle<(Vec<String>, World)>) {
                     160 => {
                         let f = text(p);
                         seen.push(format!("160 {f}"));
-                        world.remove(&f);
-                        vec![message(67, format!("Deleted folder {f}").as_bytes())]
+                        // As the fork does: the folder goes, but its
+                        // name still lists, empty, when the account's
+                        // rights cover it (live run 2026-11-13).
+                        let r = if f == "keep/" {
+                            vec![message(
+                                67,
+                                format!("Could not remove folder {f}").as_bytes(),
+                            )]
+                        } else {
+                            world.insert(f.clone(), BTreeMap::new());
+                            vec![message(
+                                67,
+                                format!("Folder {f} has been removed.").as_bytes(),
+                            )]
+                        };
+                        r
                     }
                     _ => continue,
                 };
@@ -278,11 +297,23 @@ fn rm_of_a_file_not_listed_sends_nothing() {
 }
 
 #[test]
-fn rmdir_sends_160_and_checks_it_no_longer_lists() {
+fn rmdir_sends_160_and_reads_the_servers_answer() {
     let (addr, h) = fake(world());
     let out = ok(&cli(&addr, &["rmdir", "old/", "--yes"]));
     assert!(out.contains("deleted folder old/"), "{out}");
     let (seen, w) = h.join().unwrap();
-    assert_eq!(seen, ["90 old/", "160 old/", "90 old/"]);
-    assert!(!w.contains_key("old/"));
+    assert_eq!(seen, ["90 old/", "160 old/"]);
+    assert!(w["old/"].is_empty());
+}
+
+#[test]
+fn rmdir_refused_by_the_server_fails() {
+    let mut w = world();
+    w.insert("keep/".into(), BTreeMap::new());
+    let (addr, h) = fake(w);
+    let o = cli(&addr, &["rmdir", "keep/", "--yes"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("Could not remove folder keep/"));
+    let (seen, _) = h.join().unwrap();
+    assert_eq!(seen, ["90 keep/", "160 keep/"]);
 }

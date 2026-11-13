@@ -280,14 +280,26 @@ fn fake_listserver(refuse: bool) -> (String, thread::JoinHandle<ListSeen>) {
     let h = thread::spawn(move || {
         let (mut s, _) = l.accept().unwrap();
         s.set_read_timeout(Some(TIMEOUT)).unwrap();
-        let hs = zlib_decompress(&read_raw_frame(&mut s)).unwrap();
-        // Id 5 (gen 5, the 2004 RC) or id 0 (plain zlib, the 2002/05/02 RC).
-        let mut codec = match hs[0] - 0x20 {
-            5 => Codec::gen5(hs[1] - 0x20),
-            0 => Codec::Plain,
+        let mut hs = zlib_decompress(&read_raw_frame(&mut s)).unwrap();
+        // Id 5 (gen 5, the 2004 RC): the login follows in its own frame.
+        // Id 0 (plain zlib, the 2002/05/02 RC): the login is in the same
+        // frame, as rc141 sends it; a lone id 0 is answered as a login by
+        // the real listserver, so it is refused here.
+        let (mut codec, account) = match hs[0] - 0x20 {
+            5 => {
+                let mut codec = Codec::gen5(hs[1] - 0x20);
+                let account = split_messages(&codec.decode(&read_raw_frame(&mut s)).unwrap());
+                (codec, account)
+            }
+            0 => {
+                let end = hs.iter().position(|b| *b == b'\n').unwrap() + 1;
+                let account = split_messages(&hs[end..]);
+                assert!(!account.is_empty(), "classic login sent in a second frame");
+                hs.truncate(end);
+                (Codec::Plain, account)
+            }
             id => panic!("unexpected RC list handshake id {id}"),
         };
-        let account = split_messages(&codec.decode(&read_raw_frame(&mut s)).unwrap());
         if refuse {
             send_msgs(
                 &mut s,
@@ -351,7 +363,8 @@ fn rc_list_from_listserver_classic() {
     let reply = fetch_rc_list(&addr, true, "labrc", "labpw", 0x11, TIMEOUT).unwrap();
     assert_eq!(reply.servers.len(), 2);
     let (hs, account) = h.join().unwrap();
-    // The 2002/05/02 RC's handshake: id 0, then `rc`, plain zlib after it.
+    // The 2002/05/02 RC's handshake: id 0, then `rc`, and the login in the
+    // same plain zlib frame.
     assert_eq!(hs, b" rc\n");
     assert_eq!(account[0].payload, b"%labrc%labpw");
 }

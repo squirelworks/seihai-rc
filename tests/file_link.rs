@@ -141,8 +141,11 @@ fn split_client_raw(body: &[u8]) -> (u8, Vec<u8>) {
     );
     let n = read_gint3(&body[1..4]).unwrap();
     assert_eq!(body[4], b'\n');
+    // The count includes the block's own final line feed, as real RCs send
+    // it; the server drops that byte.
     assert_eq!(body.len(), 5 + n);
-    let inner = &body[5..];
+    assert_eq!(body[4 + n], b'\n');
+    let inner = &body[5..4 + n];
     (inner[0].wrapping_sub(0x20), inner[1..].to_vec())
 }
 

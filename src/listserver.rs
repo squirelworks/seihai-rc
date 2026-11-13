@@ -55,6 +55,15 @@ pub fn classic_handshake_body() -> Vec<u8> {
     b
 }
 
+/// The classic RC-list login as rc141 sends it: [`classic_handshake_body`]
+/// and [`account_message`] together, in one plain zlib frame.
+pub fn classic_login_body(account: &str, password: &str) -> Vec<u8> {
+    let mut b = classic_handshake_body();
+    b.extend_from_slice(&account_message(account, password));
+    b.push(b'\n');
+    b
+}
+
 /// The account message: id 1, account, password.
 pub fn account_message(account: &str, password: &str) -> Vec<u8> {
     let mut p = Vec::new();
@@ -113,11 +122,14 @@ pub fn fetch_rc_list(
     let deadline = Instant::now() + timeout;
     let mut link = Link::connect(addr, timeout)?;
     if classic {
-        link.send_login(&classic_handshake_body(), Codec::Plain)?;
+        // rc141 sends " rc" and the login in one zlib frame. Sent as two
+        // frames, the listserver answers the lone id 0 as a login for
+        // "player" and then answers the real login too (lab, 2026-11-13).
+        link.send_login(&classic_login_body(account, password), Codec::Plain)?;
     } else {
         link.send_login(&handshake_body(key), Codec::gen5(key & 0x7F))?;
+        link.send(&[account_message(account, password)])?;
     }
-    link.send(&[account_message(account, password)])?;
     let reply = read_reply(&mut link, deadline);
     link.shutdown();
     reply
@@ -273,6 +285,15 @@ mod tests {
     fn classic_handshake_bytes() {
         // The 2002/05/02 RC's frame in the same capture: `20 72 63`.
         assert_eq!(classic_handshake_body(), b" rc\n");
+    }
+
+    #[test]
+    fn classic_login_matches_rc141() {
+        // rc141's one frame in the second lab pass (2026-11-13), inflated.
+        assert_eq!(
+            classic_login_body("labrc", "labpw"),
+            b" rc\n!%labrc%labpw\n"
+        );
     }
 
     #[test]

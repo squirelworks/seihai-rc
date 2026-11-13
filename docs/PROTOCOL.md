@@ -104,7 +104,11 @@ hex and does not parse them. The layout of 124 is unknown.
 2. Gen-5 frame: id 1 + GSTRING account + GSTRING password.
 
 With `--rc classic` the handshake is the 2002/05/02 RC's: plain zlib both
-ways, id 0 + `rc`, then the same id 1. Its list comes back without type
+ways, id 0 + `rc` and the same id 1 in **one** frame, as rc141 sends them
+(`0017 78da53284ae65254cd494c2a4a069105e55c0031c2058f`, inflated
+` rc\n!%labrc%labpw\n`). Sent as two frames, the listserver answers the lone
+id 0 as a login for `player` and then answers the real login too, so the
+list arrives twice (seihai-rc live run, 2026-11-13). Its list comes back without type
 tags. RC3 instead sends a game client's id 7 with `G3D30123` and the list
 name `rc2`; `seihai-rc` does not send that form.
 
@@ -390,20 +394,21 @@ still in front of the file, and the fork answered id 67, `Uploaded file rc-probe
 | Folder line | 67 `RC_FILEBROWSER_MESSAGE` | `Folder changed to ` and the folder, before id 66. Any other id 67 is a refusal. |
 | Get | 92 `RC_FILEBROWSER_DOWN` | The path, the rest of the line. No length byte. The fork joins it to the folder from the last list. |
 | File | 100 raw, then 102 `PLO_FILE` | `GINT5` modification time, `GCHAR` name length, the name, the file bytes. The raw length counts one line feed after the file; that byte is not part of the file. |
-| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. |
+| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. As for id 100, the raw length counts one line feed after the message (32015 for a 32014-byte 93 from the 2004 RC), and the block ends with it. The fork with #63 drops that byte; a count without it cost the file's own last byte in the seihai-rc live run of 2026-11-13. |
 | Stored | 67 `RC_FILEBROWSER_MESSAGE` | `Uploaded file ` and the name. Any other id 67 is a refusal. |
 
 | Move | 96 `RC_FILEBROWSER_MOVE` | `GSTRING` target folder, then the file name in the folder from the last list as the rest of the line. The fork answers id 67 `Moved file <from> to <to>`. |
 | Delete | 97 `RC_FILEBROWSER_DELETE` | The file name in the folder from the last list, the rest of the line, with no confirm dialog in the 2004 RC. The fork answers id 67 `Deleted file <name>`. |
 | Rename | 98 `RC_FILEBROWSER_RENAME` | `GSTRING` old name, `GSTRING` new name, both in the folder from the last list. The fork answers id 67 `Renamed file <old> to <new>`. |
-| Folder delete | 160 `RC_FOLDERDELETE` | The folder with a trailing `/`, the rest of the line (`c0 world/labgone/` from RC3). `seihai-rc` adds the slash when it is missing. The fork at `a3b6ac23` sent 16 and dropped the link both for a folder that was not empty and after removing an empty one (#63 fixes that). |
+| Folder delete | 160 `RC_FOLDERDELETE` | The folder with a trailing `/`, the rest of the line (`c0 world/labgone/` from RC3). `seihai-rc` adds the slash when it is missing. The fork at `a3b6ac23` sent 16 and dropped the link both for a folder that was not empty and after removing an empty one (#63 fixes that). With #63 it answers 67 `Folder world/labdir/ has been removed.`, then 65 and 66 `/`. A later 90 of the deleted folder still answers `Folder changed to` and an empty 66 when the account's rights cover it, so `seihai-rc files rmdir` reads the 67 line instead of listing again. |
 
 All four match real RCs: move and delete from the 2004 RC, rename and
 folder delete from RC3 (lab 2026-11-13). After each, the real RC sends 90
 for the current folder again. What the server
-answers to them is not relied on either: `seihai-rc files mv|rename|rm|rmdir`
-prints any id 67 lines and lists the folder again to see the result. A
-list of a folder that is gone gets a refusal, or no answer from the fork.
+answers to mv, rename and rm is not relied on: `seihai-rc files mv|rename|rm`
+prints any id 67 lines and lists the folder again to see the result.
+`rmdir` goes by the 67 line (see the table), and lists again only when the
+server sends no 67 at all.
 
 Id 65 `RC_FILEBROWSER_DIRLIST` is the reply to id 89 `START`, which this
 client does not send. Not sent, layout unknown: 91 `END`.

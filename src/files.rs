@@ -44,9 +44,10 @@
 //!   trailing `/` as the rest of the line.
 //!
 //! All four match real RCs (the 2004 RC and RC3, lab 2026-11-13). The
-//! server's answer to them is not relied on: [`Session::file_action`] returns the id
-//! 67 lines it sends, and the command line lists the folder again to see
-//! whether the change happened.
+//! [`Session::file_action`] returns the id 67 lines the server sends. For
+//! move, delete and rename the command line lists the folder again to see
+//! whether the change happened; for folder delete it reads the 67 line,
+//! because the fork still lists a deleted folder the account's rights cover.
 //!
 //! # Large files
 //!
@@ -228,13 +229,19 @@ fn push_gint3(out: &mut Vec<u8>, n: usize) {
     out.push(gchar((n & 0x7F) as u8));
 }
 
-/// Id, `GINT3` length, line feed, then `inner` (a message, id included).
+/// Id, `GINT3` length, line feed, then `inner` (a message, id included)
+/// and its own line feed. The length counts that last line feed, as real
+/// RCs count it (the 2004 RC and RC3, lab 2026-11-13: 32015 for a
+/// 32014-byte id 93). The server drops it; a length without it made the
+/// fork drop the file's own last byte instead (seihai-rc live run,
+/// 2026-11-13).
 fn raw_block(id: u8, inner: &[u8]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(5 + inner.len());
+    let mut body = Vec::with_capacity(6 + inner.len());
     body.push(gchar(id));
-    push_gint3(&mut body, inner.len());
+    push_gint3(&mut body, inner.len() + 1);
     body.push(b'\n');
     body.extend_from_slice(inner);
+    body.push(b'\n');
     body
 }
 
@@ -765,9 +772,10 @@ mod tests {
 
     #[test]
     fn upload_bytes_are_the_file_after_the_name() {
-        // Id 50, GINT3(9), line feed, then id 93, GSTRING "a.nw", "hi\n".
-        // No GINT3 size in front of the file.
-        assert_eq!(upload_body("a.nw", b"hi\n").unwrap(), b"R  )\n}$a.nwhi\n");
+        // Id 50, GINT3(10), line feed, then id 93, GSTRING "a.nw", "hi\n",
+        // and the block's own line feed, which the length counts. No GINT3
+        // size in front of the file.
+        assert_eq!(upload_body("a.nw", b"hi\n").unwrap(), b"R  *\n}$a.nwhi\n\n");
     }
 
     #[test]
