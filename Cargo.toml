@@ -17,11 +17,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Protocol, framing, version profiles and scripting shared with the Seihai client.
-seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.0.26", default-features = false }
+seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.1.0", default-features = false }
 
 [dev-dependencies]
 # The real listserver, for tests/real_listserver.rs. Same licence.
-seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", tag = "v0.1.0" }
+seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "4ca985d2675cecff010ff60ec0a1088ff8b1d00a" }
 
 # The listserver hashes and checks account passwords with argon2, which is
 # very slow unoptimised.
