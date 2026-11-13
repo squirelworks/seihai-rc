@@ -394,17 +394,47 @@ pub struct PropsReply {
     /// the real RC's 76). The gserver-v2 fork sends a count of 0 even for
     /// an account with flags stored.
     pub flags: Vec<String>,
-    /// The opened-chest count, the GSHORT after the flags. Only 0 has
-    /// been seen; what follows a non-zero count is not known.
-    pub chests: u16,
-    /// The weapon names. `None` when the chest count is not 0, as the
-    /// weapons cannot then be found.
-    pub weapons: Option<Vec<String>>,
+    /// The opened chests: a GSHORT count, then each chest as a GSTRING whose
+    /// body is GCHAR x, GCHAR y and the level name (lab 2026-11-13, an
+    /// account with two `CHEST` lines; the real 2004 RC sent them back
+    /// unchanged in 76).
+    pub chests: Vec<Chest>,
+    /// The weapon names.
+    pub weapons: Vec<String>,
+}
+
+/// One opened chest in 72 and 76.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chest {
+    /// The chest's tile, as one GCHAR each.
+    pub x: u8,
+    pub y: u8,
+    pub level: String,
+}
+
+impl Chest {
+    /// The GSTRING body: GCHAR x, GCHAR y, then the level name.
+    fn body(&self) -> Vec<u8> {
+        let mut b = vec![gchar(self.x), gchar(self.y)];
+        b.extend_from_slice(&latin1_bytes(&self.level));
+        b
+    }
+
+    fn parse(body: &[u8]) -> Option<Chest> {
+        let x = body.first()?.checked_sub(0x20)?;
+        let y = body.get(1)?.checked_sub(0x20)?;
+        Some(Chest {
+            x,
+            y,
+            level: text(&body[2..]),
+        })
+    }
 }
 
 /// Read id 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR
 /// props length N, N bytes of props, GSHORT flag count and a GSTRING per
-/// flag, GSHORT chest count, GCHAR weapon count, then a GSTRING per weapon.
+/// flag, GSHORT chest count and a GSTRING per chest ([`Chest`]), GCHAR
+/// weapon count, then a GSTRING per weapon.
 pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
     use seihai_core::protocol::{parse_player_props, read_gshort};
     let id = read_gshort(payload)?;
@@ -420,19 +450,18 @@ pub fn parse_props(payload: &[u8]) -> Option<PropsReply> {
     for _ in 0..nflags {
         flags.push(text(&read_gstring(payload, &mut i)?));
     }
-    let chests = read_gshort(payload.get(i..)?)?;
+    let nchests = read_gshort(payload.get(i..)?)?;
     i += 2;
-    let weapons = if chests == 0 {
-        let n = payload.get(i)?.wrapping_sub(0x20);
-        i += 1;
-        let mut names = Vec::with_capacity(usize::from(n));
-        for _ in 0..n {
-            names.push(text(&read_gstring(payload, &mut i)?));
-        }
-        Some(names)
-    } else {
-        None
-    };
+    let mut chests = Vec::with_capacity(usize::from(nchests));
+    for _ in 0..nchests {
+        chests.push(Chest::parse(&read_gstring(payload, &mut i)?)?);
+    }
+    let n = payload.get(i)?.checked_sub(0x20)?;
+    i += 1;
+    let mut weapons = Vec::with_capacity(usize::from(n));
+    for _ in 0..n {
+        weapons.push(text(&read_gstring(payload, &mut i)?));
+    }
     Some(PropsReply {
         id,
         account,
@@ -527,28 +556,34 @@ fn push_gint3(out: &mut Vec<u8>, v: u32) {
 /// Id 76, `PLI_RC_PLAYERPROPSSET2`, built from a 72 the way the real RC
 /// builds it (both 2026-11-04 captures): GSTRING account, GSTRING world,
 /// GCHAR props length and the props in [`SET_PROP_IDS`] order, GSHORT
-/// flag count and a GSTRING each, GSHORT chest count (0), GCHAR weapon
-/// count and a GSTRING each, then a GCHAR 0.
+/// flag count and a GSTRING each, GSHORT chest count and a GSTRING each,
+/// GCHAR weapon count and a GSTRING each, then a GCHAR 0.
 ///
 /// Each prop comes from `from`, then `edits` replace theirs. Online
 /// seconds (29) go as 0, as the real RC sends them; the fork ignores them.
 /// Props 7, 21, 22 and 23, which the fork's 72 leaves out, go as the RC
-/// sent them (7 as 1, the rest empty). A 72 with chests, with unread
-/// weapons or without one of the other props is refused.
+/// sent them (7 as 1, the rest empty). Status (18) goes without its paused
+/// bit. Flags go back sorted and chests as they came, as the 2004 RC did
+/// (lab 2026-11-13). A 72 without one of the
+/// other props is refused.
 pub fn props_set(from: &PropsReply, edits: &[(u8, Vec<u8>)]) -> Result<Vec<u8>, String> {
-    if from.chests != 0 {
-        return Err("the props carry opened chests; that layout is not known".into());
-    }
-    let weapons = from
-        .weapons
-        .as_ref()
-        .ok_or("the weapons in the props were not read")?;
+    let weapons = &from.weapons;
     let mut block = Vec::new();
     for id in SET_PROP_IDS {
         let raw = match edits.iter().rev().find(|(e, _)| *e == id) {
             Some((_, raw)) => raw.clone(),
             None => match id {
                 29 => vec![0x20; 3],
+                // Status: the 2004 RC sent 21 (paused, male, weapons) back as
+                // 20, without the paused bit (lab 2026-11-13); 20 stayed 20 in
+                // the 2026-11-04 captures. Its dialog has no paused box.
+                18 => from
+                    .props
+                    .iter()
+                    .find(|p| p.id == 18)
+                    .and_then(|p| p.raw.first())
+                    .map(|b| vec![gchar(b.wrapping_sub(0x20) & !1)])
+                    .ok_or("the props have no prop 18 to send back")?,
                 7 | 21..=23 => from
                     .props
                     .iter()
@@ -574,11 +609,18 @@ pub fn props_set(from: &PropsReply, edits: &[(u8, Vec<u8>)]) -> Result<Vec<u8>, 
     push_gstring(&mut payload, &account);
     push_gstring(&mut payload, &latin1_bytes(&from.world));
     push_gstring(&mut payload, &block);
-    push_gshort(&mut payload, from.flags.len() as u16);
-    for f in &from.flags {
+    // The RC sends the flags sorted (lab 2026-11-13: the fork's 72 had
+    // `quest.done=yes, labflag=1`, the RC's 76 `labflag=1, quest.done=yes`).
+    let mut flags: Vec<&String> = from.flags.iter().collect();
+    flags.sort();
+    push_gshort(&mut payload, flags.len() as u16);
+    for f in flags {
         push_gstring(&mut payload, &latin1_bytes(f));
     }
-    push_gshort(&mut payload, 0);
+    push_gshort(&mut payload, from.chests.len() as u16);
+    for c in &from.chests {
+        push_gstring(&mut payload, &c.body());
+    }
     payload.push(gchar(weapons.len() as u8));
     for w in weapons {
         push_gstring(&mut payload, &latin1_bytes(w));
@@ -783,17 +825,17 @@ mod tests {
         // Online seconds, GINT3 475.
         assert_eq!(r.props[19].raw, [0x20, 0x23, 0x7b]);
         assert!(r.flags.is_empty());
-        assert_eq!(r.chests, 0);
+        assert!(r.chests.is_empty());
         assert_eq!(
-            r.weapons.unwrap(),
+            r.weapons,
             ["bomb".to_string(), "bow".into(), "-gr_movement".into()]
         );
-        // A chest count that is not 0: the weapons are not guessed.
+        // A chest count with no chest after it: not read.
         let mut odd = hex(CAPTURED_72);
         let at = odd.len() - 27;
         assert_eq!(&odd[at..at + 4], b"    ");
         odd[at + 3] = 0x21;
-        assert_eq!(parse_props(&odd).unwrap().weapons, None);
+        assert!(parse_props(&odd).is_none());
         assert!(parse_props(&hex(&CAPTURED_72[..40])).is_none());
     }
 
@@ -812,7 +854,7 @@ mod tests {
         assert_eq!(r.account, "test1");
         assert!(r.props_complete);
         assert!(r.flags.is_empty());
-        assert_eq!(r.weapons.as_ref().unwrap().len(), 3);
+        assert_eq!(r.weapons.len(), 3);
     }
 
     #[test]
@@ -827,7 +869,38 @@ mod tests {
         reply.extend_from_slice(&msg[1..msg.len() - 1]);
         let back = parse_props(&reply).unwrap();
         assert_eq!(back.flags, ["labflag=1"]);
-        assert_eq!(back.weapons.unwrap().len(), 3);
+        assert_eq!(back.weapons.len(), 3);
+    }
+
+    /// 2026-11-13, a real 2004 RC: the fork's 72 for `labflags` (two flags,
+    /// two opened chests), without the id byte.
+    const CAPTURED3_72: &str = "2020286c6162666c616773246d61696eb22027756e6b6e6f776e2123222623202020242a25252621283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5c305d323534336f6e6c696e6573746172746c6f63616c2e6e773a203b2020203c2020203d2020203e2020202020405242286c6162666c6167734328626f64792e706e67444e927e20222e71756573742e646f6e653d796573296c6162666c61673d312022353e346f6e6c696e6573746172746c6f63616c2e6e77352a2c6f6e6c696e6573746172746c6f63616c2e6e772324626f6d6223626f772c2d67725f6d6f76656d656e74";
+    /// The 76 that RC sent back after gralats 0 -> 7.
+    const CAPTURED3_76: &str = "6c286c6162666c616773246d61696e9d2123222623202027242a252526212721283f2a73776f7264312e706e67292b2b736869656c64312e706e672a2469646c652b8d68656164302e706e672d22202a24322f5c305d323434336f6e6c696e6573746172746c6f63616c2e6e773520362037203a203b2020203c2020203d20202040524328626f64792e706e672022296c6162666c61673d312e71756573742e646f6e653d7965732022353e346f6e6c696e6573746172746c6f63616c2e6e77352a2c6f6e6c696e6573746172746c6f63616c2e6e772324626f6d6223626f772c2d67725f6d6f76656d656e7420";
+
+    #[test]
+    fn props_with_chests_match_capture_3() {
+        let r = parse_props(&hex(CAPTURED3_72)).unwrap();
+        assert_eq!(r.account, "labflags");
+        assert_eq!(r.flags, ["quest.done=yes", "labflag=1"]);
+        assert_eq!(
+            r.chests,
+            [
+                Chest {
+                    x: 30,
+                    y: 20,
+                    level: "onlinestartlocal.nw".into()
+                },
+                Chest {
+                    x: 10,
+                    y: 12,
+                    level: "onlinestartlocal.nw".into()
+                },
+            ]
+        );
+        assert_eq!(r.weapons, ["bomb", "bow", "-gr_movement"]);
+        let set = props_set(&r, &[parse_prop_edit("gralats=7").unwrap()]).unwrap();
+        assert_eq!(set, hex(CAPTURED3_76));
     }
 
     #[test]
@@ -871,9 +944,6 @@ mod tests {
             assert!(parse_prop_edit(bad).is_err(), "{bad}");
         }
         assert_eq!(parse_prop_edit("gralats=2097151").unwrap().1, [0x9f; 3]);
-        let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
-        r.chests = 1;
-        assert!(props_set(&r, &[]).is_err());
         let mut r = parse_props(&hex(CAPTURED2_72)).unwrap();
         r.props.retain(|p| p.id != 35);
         assert!(props_set(&r, &[]).unwrap_err().contains("35"));

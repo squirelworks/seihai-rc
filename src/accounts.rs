@@ -17,6 +17,7 @@ pub mod pli {
     pub const RC_ACCOUNTLISTGET: u8 = 72;
     pub const RC_ACCOUNTGET: u8 = 77;
     pub const RC_ACCOUNTSET: u8 = 78;
+    pub const RC_PLAYERPROPSRESET: u8 = 75;
 }
 
 /// Server to client ids for stage 3.
@@ -109,6 +110,14 @@ pub fn account_delete(account: &str) -> Result<Vec<u8>, AccountError> {
     Ok(message(pli::RC_ACCOUNTDEL, &account_bytes(account)?))
 }
 
+/// Id 75, `PLI_RC_PLAYERPROPSRESET`: the account as the rest of the line.
+/// The 2004 RC sends it from the account menu after a confirm dialog (lab
+/// 2026-11-13). The fork resets the account to `(defaultaccount)`, keeping
+/// its rights, IP range and folders, and answers with an RC chat line.
+pub fn account_reset(account: &str) -> Result<Vec<u8>, AccountError> {
+    Ok(message(pli::RC_PLAYERPROPSRESET, &account_bytes(account)?))
+}
+
 /// The fields of the RC's account dialog that go on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Account {
@@ -118,16 +127,20 @@ pub struct Account {
     pub load_only: bool,
     pub admin_level: u8,
     pub admin_worlds: String,
+    /// The ban length as the server's 73 carries it (a GSTRING, such as
+    /// `3600`; empty when none is set). Read only: the RC's 78 and 70 never
+    /// send it (2004 RC, lab 2026-11-13), so a set leaves it as it is.
+    pub ban_length: String,
     /// The ban reason, one item per line.
     pub ban_reason: Vec<String>,
 }
 
 /// Read id 73: GSTRING account, GSTRING password (always empty from the
 /// fork), GSTRING e-mail, GCHAR banned, GCHAR load only, GCHAR admin level,
-/// GSTRING admin worlds, one byte, then the ban reason tokenized as a
-/// GSTRING. The byte before the reason was 0x20 in every capture and the
-/// RC never sends it back; it is most likely the ban time. A reply where it
-/// is not 0x20 is not read, as its width is not known.
+/// GSTRING admin worlds, GSTRING ban length, then the ban reason tokenized
+/// as a GSTRING. The ban length was an empty GSTRING (0x20) in the
+/// 2026-11-04 captures; with `BANLENGTH 3600` in the account file the fork
+/// sent `24 33 36 30 30` and the 2004 RC showed 3600 (lab 2026-11-13).
 pub fn parse_account(payload: &[u8]) -> Option<Account> {
     let mut i = 0;
     let account = text(&read_gstring(payload, &mut i)?);
@@ -137,10 +150,7 @@ pub fn parse_account(payload: &[u8]) -> Option<Account> {
     i += 3;
     let flag = |b: u8| b.wrapping_sub(0x20);
     let admin_worlds = text(&read_gstring(payload, &mut i)?);
-    if *payload.get(i)? != 0x20 {
-        return None;
-    }
-    i += 1;
+    let ban_length = text(&read_gstring(payload, &mut i)?);
     let reason = text(&read_gstring(payload, &mut i)?);
     Some(Account {
         account,
@@ -149,6 +159,7 @@ pub fn parse_account(payload: &[u8]) -> Option<Account> {
         load_only: flag(flags[1]) != 0,
         admin_level: flag(flags[2]),
         admin_worlds,
+        ban_length,
         ban_reason: gdetokenize(&reason),
     })
 }
@@ -226,6 +237,8 @@ mod tests {
         // 77 + 0x20 = 'm', 71 + 0x20 = 'g'.
         assert_eq!(account_get("test1").unwrap(), b"mtest1");
         assert_eq!(account_delete("labadd").unwrap(), b"glabadd");
+        // 75 + 0x20 = 'k'.
+        assert_eq!(account_reset("labprops").unwrap(), b"klabprops");
         assert_eq!(account_get(""), Err(AccountError::NoAccount));
         assert!(account_get("a\nb").is_err());
     }
@@ -239,8 +252,13 @@ mod tests {
         assert!(a.load_only);
         assert_eq!(a.admin_level, 2);
         assert_eq!(a.ban_reason, ["lab reason"]);
-        // A byte before the reason that is not 0x20: not read.
-        assert!(parse_account(b"%test1 3lab@example.invalid   $main!  ").is_none());
+        // The timed ban of 2026-11-13: ban length 3600, then the reason.
+        let a = parse_account(b"&labban  !  $main$3600/\"lab timed ban\"").unwrap();
+        assert!(a.banned);
+        assert_eq!(a.ban_length, "3600");
+        assert_eq!(a.ban_reason, ["lab timed ban"]);
+        // A ban length GSTRING that runs past the message: not read.
+        assert!(parse_account(b"%test1 3lab@example.invalid   $main!").is_none());
         assert!(parse_account(b"%test1 3lab@ex").is_none());
     }
 

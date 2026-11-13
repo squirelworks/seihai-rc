@@ -707,12 +707,21 @@ fn weapon_list_get_set_and_delete() {
 }
 
 #[test]
-fn a_script_line_break_is_refused_before_connect() {
-    let nc = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = nc.local_addr().unwrap().to_string();
-    nc.set_nonblocking(true).unwrap();
+fn a_script_with_line_breaks_goes_tokenized() {
+    // As the 2004 RC sent it (lab 2026-11-13): one tokenized item per line.
     let path = std::env::temp_dir().join("seihai-rc-script-break.txt");
-    std::fs::write(&path, "line\nbreak").unwrap();
+    std::fs::write(
+        &path,
+        "// lab npc script\nif (created) {\n  this.lab = 1;\n}\n",
+    )
+    .unwrap();
+    let mut payload = gint3_only(12);
+    payload.extend_from_slice(b"\"// lab npc script\",\"if (created) {\",\"  this.lab = 1;\",}");
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: 109,
+        payload,
+        reply: vec![],
+    });
     let output = cli(&[
         "nc",
         "npc",
@@ -724,18 +733,97 @@ fn a_script_line_break_is_refused_before_connect() {
         &addr,
         "--account",
         "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
     ]);
-    assert!(!output.status.success(), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("still needs a lab check"),
-        "{}",
-        stderr(&output)
-    );
-    match nc.accept() {
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
-        other => panic!("connected despite the line break: {other:?}"),
-    }
+    assert!(output.status.success(), "{}", stderr(&output));
+    handle.join().unwrap();
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn npc_add_reset_and_flags() {
+    let mut row = gint3_only(1001);
+    row.push(0x20 + 50);
+    row.push(0x20 + 6);
+    row.extend_from_slice(b"labnpc");
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: 111,
+        payload: b"labnpc,1001,OBJECT,labnc,npcdemo_start.nw,20,25".to_vec(),
+        reply: vec![message(158, &row)],
+    });
+    let output = cli(&[
+        "nc",
+        "npc",
+        "add",
+        "labnpc",
+        "1001",
+        "OBJECT",
+        "npcdemo_start.nw",
+        "20",
+        "25",
+        "--server",
+        &addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "added 1001\n");
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: 105,
+        payload: gint3_only(1001),
+        reply: vec![message(29, &gint3_only(1001))],
+    });
+    let output = cli(&[
+        "nc",
+        "npc",
+        "reset",
+        "1001",
+        "--server",
+        &addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reset 1001\n");
+    handle.join().unwrap();
+
+    let mut flags = gint3_only(1001);
+    flags.extend_from_slice(b"labnpcflag=1,\"other.flag=a b\"");
+    let (addr, handle) = fake_nc(NcPlan::Reply {
+        id: 108,
+        payload: gint3_only(1001),
+        reply: vec![message(161, &flags)],
+    });
+    let output = cli(&[
+        "nc",
+        "npc",
+        "flags",
+        "1001",
+        "--server",
+        &addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "labnpcflag=1\nother.flag=a b\n");
+    handle.join().unwrap();
 }
 
 #[test]

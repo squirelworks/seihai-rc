@@ -4,17 +4,19 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use seihai_rc::accounts::{
-    account_add, account_delete, account_get, account_list, account_set, parse_account,
-    parse_account_list, plo as accounts_plo, Account,
+    account_add, account_delete, account_get, account_list, account_reset, account_set,
+    parse_account, parse_account_list, plo as accounts_plo, Account,
 };
 use seihai_rc::files::{
     delete_message, folder_delete_message, move_message, rename_message, split_path, FileError,
 };
 use seihai_rc::listserver::{decode_server_key, fetch_rc_list, fetch_rc_list_secure, pick};
 use seihai_rc::nc::{
-    class_delete_message, class_get_message, class_set_message, npc_delete_message,
-    npc_get_message, npc_script_get_message, npc_script_set_message, weapon_delete_message,
-    weapon_get_message, weapon_list_message, weapon_set_message, NcEvent, NcSession,
+    class_delete_message, class_get_message, class_set_message, npc_add_message,
+    npc_delete_message, npc_flags_get_message, npc_flags_set_message, npc_get_message,
+    npc_reset_message, npc_script_get_message, npc_script_set_message, npc_warp_message,
+    weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcEvent,
+    NcSession, NewNpc,
 };
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, parse_ban,
@@ -54,6 +56,7 @@ USAGE:
   seihai-rc accounts set ACCOUNT [FIELDS] (--server ... | --listserver ... --pick ...)
   seihai-rc accounts add ACCOUNT --new-password-env VAR [FIELDS] (--server ...)
   seihai-rc accounts delete ACCOUNT --yes (--server ... | --listserver ... --pick ...)
+  seihai-rc accounts reset ACCOUNT --yes (--server ... | --listserver ... --pick ...)
   seihai-rc server options [--set-file PATH] (--server ... | --listserver ... --pick ...)
   seihai-rc server folders [--set-file PATH] (--server ... | ...)
   seihai-rc server flags [--set-file PATH] (--server ... | ...)
@@ -70,6 +73,10 @@ USAGE:
   seihai-rc nc npc get ID [--script] (--server ... | --discover ...) --account NAME
   seihai-rc nc npc set ID --script TEXT (--server ... | --discover ...) --account NAME
   seihai-rc nc npc delete ID (--server ... | --discover ...) --account NAME
+  seihai-rc nc npc add NAME ID TYPE LEVEL X Y (--server ... | --discover ...) --account NAME
+  seihai-rc nc npc reset ID (--server ... | --discover ...) --account NAME
+  seihai-rc nc npc warp ID LEVEL X Y (--server ... | --discover ...) --account NAME
+  seihai-rc nc npc flags ID [--set-file PATH] (--server ... | --discover ...) --account NAME
   seihai-rc nc classes (--server ... | --discover ...) --account NAME
   seihai-rc nc class get NAME (--server ... | --discover ...) --account NAME
   seihai-rc nc class set NAME --script TEXT (--server ... | --discover ...) --account NAME
@@ -132,6 +139,10 @@ USAGE:
   accounts delete
                 Delete an account (id 71), then list it to check it is
                 gone. Needs --yes, as it cannot be undone.
+  accounts reset
+                Reset an account's attributes to the server's default
+                account (id 75); the server keeps its rights and folders.
+                Waits for the server's RC chat line. Needs --yes.
   files ls      List the files in DIR (id 90, reply 66). Default: the
                 folder the server starts in.
   files get     Fetch PATH (id 92, file 102) to --out FILE, or to stdout.
@@ -142,7 +153,7 @@ USAGE:
   files mv      Move PATH into FOLDER (id 96), then list both folders.
   files rename  Rename PATH to NEWNAME in the same folder (id 98), then list.
   files rm      Delete PATH (id 97), then list. Needs --yes.
-  files rmdir   Delete FOLDER (id 160), then check it no longer lists.
+  files rmdir   Delete FOLDER (id 160); the server's id 67 line says whether it went.
                 Needs --yes.
                 Each command lists PATH's folder first, as the server
                 names a file by the folder from the last list. The layouts
@@ -155,8 +166,8 @@ USAGE:
                 The folder config the same way (id 53, reply 77; set 54).
   server flags  The server flags, one per line (id 68, reply 61; set 69).
                 Each --set prints the line counts before and after and
-                fails if the server reads back something else. These
-                layouts are not captured from a real RC yet.
+                fails if the server reads back something else. Each
+                layout matches a real 2004 RC (lab 2026-11-13).
   nc discover   Log in to the game server, ask where each \"(Server)\" player
                 is listening (ids 94 and 79), and print the address text.
                 This does not open the NPC-Control socket.
@@ -164,14 +175,20 @@ USAGE:
                 message ids for --for seconds.
   nc npcs       List NPC rows the NPC-server sends (id 158).
   nc npc        get reads attributes (id 103, reply 157). get --script reads
-                the script (id 106, reply 160). set writes the script (id 109).
-                delete removes the NPC (id 104) and waits for id 159.
+                the script (id 106, reply 160). set writes the script (id 109,
+                tokenized, so it may hold line breaks). delete removes the
+                NPC (id 104) and waits for id 159. add creates a database
+                NPC (id 111) and waits for its id 158; the scripter is
+                --account. reset (id 105) waits for id 29. warp moves it
+                (id 107; no reply). flags prints its flags (id 108, reply
+                161); --set-file replaces them (id 110), one per line, and
+                reads them back.
   nc classes    List class names the NPC-server sends (id 163).
   nc class      get opens a class (id 112, reply 162). set saves it (id 113).
-                delete sends id 119 (GSTRING name, as class set does) and
-                waits for id 188. A bare class name is not sent.
+                delete sends id 119 with the bare name and waits for id 188.
   nc weapons    Ask for the weapon list (id 115, reply 167).
-  nc weapon     get opens a weapon (id 116, reply 33). set saves it (id 117).
+  nc weapon     get opens a weapon (id 116, reply 33; 192 to an NCL21075
+                client). set saves it (id 117, lines joined by 0xA7).
                 delete sends id 118.
 
   For every nc command except discover, --server is the NPC-server.
@@ -466,7 +483,14 @@ fn fetch_list(o: &Opts, c: &Common, ls: &str) -> Result<seihai_core::protocol::L
     } else if o.server_key.is_some() {
         return Err("--server-key is only used with --secure-login".into());
     } else {
-        fetch_rc_list(ls, &c.token, &c.account, &c.password, c.key, c.timeout)
+        fetch_rc_list(
+            ls,
+            c.kind == RcKind::Classic,
+            &c.account,
+            &c.password,
+            c.key,
+            c.timeout,
+        )
     };
     reply.map_err(|e| format!("{ls}: {e}"))
 }
@@ -814,7 +838,28 @@ fn cmd_files_rmdir(o: &Opts, folder: &str) -> Result<(), String> {
     let msg = folder_delete_message(folder).map_err(|e| e.to_string())?;
     let (mut s, c) = players_session(o)?;
     s.list_dir(folder, c.timeout).map_err(|e| e.to_string())?;
-    file_action(&mut s, o, &c, msg)?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    let lines = s
+        .file_action(msg, quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    for l in &lines {
+        println!("[server] {l}");
+    }
+    // The fork answers `Folder world/labdir/ has been removed.`. Listing the
+    // folder again proves nothing there: the fork still answers a list of a
+    // deleted folder the account's rights cover, with no files (seihai-rc
+    // live run, 2026-11-13). So the id 67 line decides, and any other id 67
+    // is a refusal. Only a server that sends no id 67 at all is checked by
+    // listing again.
+    if lines.iter().any(|l| l.contains("has been removed")) {
+        s.close();
+        println!("deleted folder {folder}");
+        return Ok(());
+    }
+    if !lines.is_empty() {
+        s.close();
+        return Err(format!("{folder} was not deleted: {}", lines.join(" / ")));
+    }
     let after = s.list_dir(folder, c.timeout);
     s.close();
     match after {
@@ -1300,11 +1345,11 @@ fn print_props(r: &PropsReply) {
     for f in &r.flags {
         println!("  {f}");
     }
-    println!("opened chests: {}", r.chests);
-    match &r.weapons {
-        Some(w) => println!("weapons: {}", w.join(", ")),
-        None => println!("weapons: not read (the chest count is not 0; that layout is not known)"),
+    println!("opened chests: {}", r.chests.len());
+    for c in &r.chests {
+        println!("  {},{} {}", c.x, c.y, c.level);
     }
+    println!("weapons: {}", r.weapons.join(", "));
 }
 
 fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
@@ -1407,6 +1452,9 @@ fn print_account(a: &Account) {
     println!("load only: {}", if a.load_only { "yes" } else { "no" });
     println!("admin level: {}", a.admin_level);
     println!("admin worlds: {}", a.admin_worlds);
+    if !a.ban_length.is_empty() {
+        println!("ban length: {}", a.ban_length);
+    }
     for line in &a.ban_reason {
         println!("ban reason: {line}");
     }
@@ -1572,6 +1620,31 @@ fn cmd_accounts_delete(o: &Opts, account: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_accounts_reset(o: &Opts, account: &str) -> Result<(), String> {
+    let msg = account_reset(account).map_err(|e| e.to_string())?;
+    if !o.yes {
+        return Err(format!(
+            "resetting {account} cannot be undone; add --yes to reset it"
+        ));
+    }
+    let c = common(o)?;
+    let (mut s, _) = login(o, &c)?;
+    let events = send_and_settle(&mut s, o, &c, msg)?;
+    s.close();
+    let said = events.iter().any(|e| {
+        matches!(e, Event::RcChat(line)
+            if line.contains("reset the attributes of account")
+                && line.to_ascii_lowercase().ends_with(&account.to_ascii_lowercase()))
+    });
+    if !said {
+        return Err(format!(
+            "sent the reset for {account}, but the server did not confirm it"
+        ));
+    }
+    println!("reset {account}");
+    Ok(())
+}
+
 fn cmd_players_kick(o: &Opts, who: &str) -> Result<(), String> {
     let (mut s, c) = players_session(o)?;
     let e = resolve(&s.players, who)?.clone();
@@ -1726,6 +1799,8 @@ fn nc_verbose(event: &NcEvent) -> String {
         NcEvent::ClassScript { name, .. } => format!("[class] script {name}"),
         NcEvent::Weapons(names) => format!("[weapons] {} name(s)", names.len()),
         NcEvent::Weapon(weapon) => format!("[weapon] {}", weapon.name),
+        NcEvent::NpcFlags { id, flags } => format!("[npc] {id} flags ({})", flags.len()),
+        NcEvent::NpcReset(id) => format!("[npc] {id} reset"),
     }
 }
 
@@ -1907,6 +1982,144 @@ fn cmd_nc_npc_delete(o: &Opts, id_text: &str) -> Result<(), String> {
     }
 }
 
+fn cmd_nc_npc_add(
+    o: &Opts,
+    name: &str,
+    id_text: &str,
+    kind: &str,
+    level: &str,
+    x: &str,
+    y: &str,
+) -> Result<(), String> {
+    let id = parse_npc_id(id_text)?;
+    let c = common(o)?;
+    let msg = npc_add_message(&NewNpc {
+        name: name.to_string(),
+        id,
+        kind: kind.to_string(),
+        scripter: c.account.clone(),
+        level: level.to_string(),
+        x: x.to_string(),
+        y: y.to_string(),
+    })
+    .map_err(|e| e.to_string())?;
+    let mut session = connect_nc(o, &c)?;
+    session.send(&[msg]).map_err(|e| e.to_string())?;
+    let events = settle_nc(&mut session, o, &c)?;
+    if events
+        .iter()
+        .any(|event| matches!(event, NcEvent::Npc(row) if row.id == id))
+    {
+        println!("added {id}");
+        session.close();
+        Ok(())
+    } else {
+        Err(format!(
+            "no NPC row (id 158) for {id} arrived; saw {}",
+            seen(&events)
+        ))
+    }
+}
+
+fn cmd_nc_npc_reset(o: &Opts, id_text: &str) -> Result<(), String> {
+    let id = parse_npc_id(id_text)?;
+    let msg = npc_reset_message(id).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let mut session = connect_nc(o, &c)?;
+    session.send(&[msg]).map_err(|e| e.to_string())?;
+    let events = settle_nc(&mut session, o, &c)?;
+    if events
+        .iter()
+        .any(|event| matches!(event, NcEvent::NpcReset(got) if *got == id))
+    {
+        println!("reset {id}");
+        session.close();
+        Ok(())
+    } else {
+        Err(format!(
+            "no NPC reset (id 29) for {id} arrived; saw {}",
+            seen(&events)
+        ))
+    }
+}
+
+fn cmd_nc_npc_warp(o: &Opts, id_text: &str, level: &str, x: &str, y: &str) -> Result<(), String> {
+    let id = parse_npc_id(id_text)?;
+    let x: f32 = x.parse().map_err(|_| format!("x: not a number: {x}"))?;
+    let y: f32 = y.parse().map_err(|_| format!("y: not a number: {y}"))?;
+    let msg = npc_warp_message(id, x, y, level).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let mut session = connect_nc(o, &c)?;
+    session.send(&[msg]).map_err(|e| e.to_string())?;
+    settle_nc(&mut session, o, &c)?;
+    println!("sent warp for {id}");
+    session.close();
+    Ok(())
+}
+
+/// The flags in the first 161 for `id`.
+fn npc_flags_of(events: &[NcEvent], id: u32) -> Option<Vec<String>> {
+    events.iter().find_map(|event| match event {
+        NcEvent::NpcFlags { id: got, flags } if *got == id => Some(flags.clone()),
+        _ => None,
+    })
+}
+
+fn cmd_nc_npc_flags(o: &Opts, id_text: &str) -> Result<(), String> {
+    let id = parse_npc_id(id_text)?;
+    let new: Option<Vec<String>> = set_file_lines(o)?.map(|text| {
+        text.lines()
+            .map(str::to_string)
+            .filter(|l| !l.is_empty())
+            .collect()
+    });
+    let set_msg = match &new {
+        Some(flags) => Some(npc_flags_set_message(id, flags).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let get_msg = npc_flags_get_message(id).map_err(|e| e.to_string())?;
+    let c = common(o)?;
+    let mut session = connect_nc(o, &c)?;
+    session
+        .send(std::slice::from_ref(&get_msg))
+        .map_err(|e| e.to_string())?;
+    let events = settle_nc(&mut session, o, &c)?;
+    let before = npc_flags_of(&events, id).ok_or_else(|| {
+        format!(
+            "no NPC flags (id 161) for {id} arrived; saw {}",
+            seen(&events)
+        )
+    })?;
+    let Some(set_msg) = set_msg else {
+        for f in &before {
+            println!("{f}");
+        }
+        session.close();
+        return Ok(());
+    };
+    session
+        .send(&[set_msg, get_msg])
+        .map_err(|e| e.to_string())?;
+    let events = settle_nc(&mut session, o, &c)?;
+    session.close();
+    let after = npc_flags_of(&events, id).ok_or_else(|| {
+        format!(
+            "no NPC flags (id 161) for {id} came back after the set; saw {}",
+            seen(&events)
+        )
+    })?;
+    println!("flags: {} before, {} after", before.len(), after.len());
+    let want = new.unwrap_or_default();
+    let mut got = after.clone();
+    got.sort();
+    let mut sorted_want = want.clone();
+    sorted_want.sort();
+    if got != sorted_want {
+        return Err(format!("the server read back {after:?}, not {want:?}"));
+    }
+    Ok(())
+}
+
 fn cmd_nc_classes(o: &Opts) -> Result<(), String> {
     let c = common(o)?;
     let mut session = connect_nc(o, &c)?;
@@ -2086,6 +2299,7 @@ fn main() -> ExitCode {
         ["accounts", "set", account] => cmd_accounts_set(&o, account, false),
         ["accounts", "add", account] => cmd_accounts_set(&o, account, true),
         ["accounts", "delete", account] => cmd_accounts_delete(&o, account),
+        ["accounts", "reset", account] => cmd_accounts_reset(&o, account),
         ["players", "kick", who] => cmd_players_kick(&o, who),
         ["players", "warp", who, level, x, y] => cmd_players_warp(&o, who, level, x, y),
         ["server", "options"] => cmd_server_text(&o, ServerText::Options),
@@ -2105,6 +2319,12 @@ fn main() -> ExitCode {
         ["nc", "npc", "get", id] => cmd_nc_npc_get(&o, id),
         ["nc", "npc", "set", id] => cmd_nc_npc_set(&o, id),
         ["nc", "npc", "delete", id] => cmd_nc_npc_delete(&o, id),
+        ["nc", "npc", "add", name, id, kind, level, x, y] => {
+            cmd_nc_npc_add(&o, name, id, kind, level, x, y)
+        }
+        ["nc", "npc", "reset", id] => cmd_nc_npc_reset(&o, id),
+        ["nc", "npc", "warp", id, level, x, y] => cmd_nc_npc_warp(&o, id, level, x, y),
+        ["nc", "npc", "flags", id] => cmd_nc_npc_flags(&o, id),
         ["nc", "classes"] | ["nc", "class", "list"] => cmd_nc_classes(&o),
         ["nc", "class", "get", name] => cmd_nc_class_get(&o, name),
         ["nc", "class", "set", name] => cmd_nc_class_set(&o, name),

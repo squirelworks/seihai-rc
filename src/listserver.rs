@@ -1,9 +1,15 @@
 //! The listserver's RC list: every server, type-tagged.
 //!
-//! Login shape (gen 5, the same key for both directions):
+//! Login shape (gen 5, the same key for both directions), as the 2004 RC
+//! (`GSERV024`) sends it (lab 2026-11-13):
 //!
-//! 1. A plain zlib frame with id 5 = `GCHAR key` + the RC's 8-byte token.
+//! 1. A plain zlib frame with id 5 = `GCHAR key` + the list name `rc`.
+//!    Not the 8-byte gserver token.
 //! 2. A gen-5 frame with id 1 = `GSTRING account` + `GSTRING password`.
+//!
+//! The classic form (`--rc classic`, as the 2002/05/02 RC sends it) is
+//! plain zlib both ways: id 0 + `rc`, then id 1 as above. Its list comes
+//! back without type tags.
 //!
 //! The secure form ([`fetch_rc_list_secure`]) uses the same id 5 and the
 //! same reply. The account goes in C2 instead of a gen-5 id 1. See
@@ -23,17 +29,37 @@ use seihai_core::protocol::{parse_list_reply, split_messages, ListReply, ServerE
 use crate::link::{Codec, Link};
 use crate::wire::{gchar, latin1_bytes, message, push_gstring, text};
 
-/// Client to listserver: RC list handshake (key + token).
+/// Client to listserver: RC list handshake (key + list name), gen 5.
 pub const PLI_V2SERVERLISTRC: u8 = 5;
+/// Client to listserver: RC list handshake (list name), classic plain zlib.
+pub const PLI_SERVERLISTRC_CLASSIC: u8 = 0;
 /// Client to listserver: account and password.
 pub const PLI_SERVERLIST: u8 = 1;
+/// The list name every captured RC sends after the handshake id (2004 RC
+/// and the 2002/05/02 RC; RC3 sends `rc2` in a game-client id 7 instead).
+pub const RC_LIST_NAME: &str = "rc";
 
-/// The handshake body: id 5, key, token, line feed.
-pub fn handshake_body(key: u8, token: &str) -> Vec<u8> {
-    let mut t = token.as_bytes().to_vec();
-    t.resize(8, b' ');
+/// The gen-5 handshake body: id 5, key, `rc`, line feed.
+pub fn handshake_body(key: u8) -> Vec<u8> {
     let mut b = vec![gchar(PLI_V2SERVERLISTRC), gchar(key & 0x7F)];
-    b.extend_from_slice(&t);
+    b.extend_from_slice(RC_LIST_NAME.as_bytes());
+    b.push(b'\n');
+    b
+}
+
+/// The classic handshake body: id 0, `rc`, line feed.
+pub fn classic_handshake_body() -> Vec<u8> {
+    let mut b = vec![gchar(PLI_SERVERLISTRC_CLASSIC)];
+    b.extend_from_slice(RC_LIST_NAME.as_bytes());
+    b.push(b'\n');
+    b
+}
+
+/// The classic RC-list login as rc141 sends it: [`classic_handshake_body`]
+/// and [`account_message`] together, in one plain zlib frame.
+pub fn classic_login_body(account: &str, password: &str) -> Vec<u8> {
+    let mut b = classic_handshake_body();
+    b.extend_from_slice(&account_message(account, password));
     b.push(b'\n');
     b
 }
@@ -82,9 +108,12 @@ impl From<io::Error> for ListError {
 ///
 /// After the list arrives, waits up to `quiet` for the status and URL
 /// messages that follow it, then closes the link.
+///
+/// `classic` sends the plain-zlib form of the 2002/05/02 RC instead of the
+/// gen-5 form of the 2004 RC.
 pub fn fetch_rc_list(
     addr: &str,
-    token: &str,
+    classic: bool,
     account: &str,
     password: &str,
     key: u8,
@@ -92,8 +121,15 @@ pub fn fetch_rc_list(
 ) -> Result<ListReply, ListError> {
     let deadline = Instant::now() + timeout;
     let mut link = Link::connect(addr, timeout)?;
-    link.send_login(&handshake_body(key, token), Codec::gen5(key & 0x7F))?;
-    link.send(&[account_message(account, password)])?;
+    if classic {
+        // rc141 sends " rc" and the login in one zlib frame. Sent as two
+        // frames, the listserver answers the lone id 0 as a login for
+        // "player" and then answers the real login too (lab, 2026-11-13).
+        link.send_login(&classic_login_body(account, password), Codec::Plain)?;
+    } else {
+        link.send_login(&handshake_body(key), Codec::gen5(key & 0x7F))?;
+        link.send(&[account_message(account, password)])?;
+    }
     let reply = read_reply(&mut link, deadline);
     link.shutdown();
     reply
@@ -241,7 +277,23 @@ mod tests {
 
     #[test]
     fn handshake_bytes() {
-        assert_eq!(handshake_body(0x2A, "GSERV025"), b"%JGSERV025\n");
+        // The 2004 RC's frame in the 2026-11-13 capture: `25 4d 72 63`.
+        assert_eq!(handshake_body(0x2D), b"%Mrc\n");
+    }
+
+    #[test]
+    fn classic_handshake_bytes() {
+        // The 2002/05/02 RC's frame in the same capture: `20 72 63`.
+        assert_eq!(classic_handshake_body(), b" rc\n");
+    }
+
+    #[test]
+    fn classic_login_matches_rc141() {
+        // rc141's one frame in the second lab pass (2026-11-13), inflated.
+        assert_eq!(
+            classic_login_body("labrc", "labpw"),
+            b" rc\n!%labrc%labpw\n"
+        );
     }
 
     #[test]

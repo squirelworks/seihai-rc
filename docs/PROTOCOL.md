@@ -59,14 +59,28 @@ An RC's own entry is not sent to it. Other RCs are listed with a level of one
 space; seihai-rc shows them as kind `rc`.
 
 After the login the RC may send its nickname: `PLI_PLAYERPROPS` (2) + prop 0
-(GSTRING). With none, the fork shows `*account`. Real RCs always send one, so
-`seihai-rc` sends `*account` when no `--nick` is given (`--no-nick` sends
-none).
+(GSTRING). With none, the fork shows `*account`. Real RCs from 2000 on send
+one, so `seihai-rc` sends `*account` when no `--nick` is given (`--no-nick`
+sends none). The 2004 RC, the 2002/05/02 RC and RC3 also send prop 53 (list
+status) as `21`; the 2001 and 2002/01/04 RCs send `*account - away` with no
+prop 53; rc133 (`GSERV014`) sends no nickname (lab 2026-11-13).
 
 A type-6 login may carry more text after the password GSTRING, up to the line
-feed: an identity string. Old RCs send none. The fork reads it when present;
-what it expects in it is **check**. `seihai-rc` sends it only with
-`--identity TEXT`.
+feed: an identity string. The 2004 RC sends none. RC3 (`GSERV025`) sends it
+tokenized: `win,<32 hex>,"",<32 hex>` (platform, a machine id, an empty item,
+a second machine id), and the fork accepted it (lab 2026-11-13). `seihai-rc`
+sends it only with `--identity TEXT`.
+
+Older RCs log in with type 1 and plain zlib both ways: `GSERV019` to
+`GSERV023` (2000/8/19 to 2002/05/02) and `GSERV014` (rc133). The fork let
+each of them in. The 2000 and 2001 builds also send their start dialog's
+timers right after login, one message each when changed: 55 respawn, 56
+horse lifetime, 57 alignment increment, 58 baddy respawn, each a GINT4
+(301 is `20 20 22 4d`). The fork ignores all four.
+
+The fork at `a3b6ac23` sent a type-6 RC one plain zlib frame (id 42, no
+compression byte, no gen 5) before the login reply (seihai-gserver-v2 #63
+fixes that).
 
 `PLO_OTHERPLPROPS` (8) is GSHORT id, then props as in `ADDPLAYER`. If it comes
 for a listed id, seihai-rc applies the nickname, level, list status and
@@ -75,7 +89,8 @@ prop. Whether the fork sends 8 to an RC is **check**. RC chat lines go out as
 `PLI_RC_CHAT` (79) + text.
 
 While the session is open, seihai-rc sends id 162 with an empty body every
-60 s. That is the RC keepalive (the 2010 RC and RC3). Game clients use the
+60 s. That is the RC keepalive (the 2010 RC and RC3; RC3 sent it about
+every 30 s in the 2026-11-13 run). Game clients use the
 same id to answer a server 108, which this client does not send. The
 NPC-Control socket does not send 162: on that socket it is the server's
 class script. If the server sends 124, seihai-rc prints the raw bytes in
@@ -83,8 +98,19 @@ hex and does not parse them. The layout of 124 is unknown.
 
 ## RC list from the listserver
 
-1. Plain zlib frame: id 5 + GCHAR key + 8-byte token.
+1. Plain zlib frame: id 5 + GCHAR key + the list name `rc` (two bytes,
+   not the gserver token). The 2004 RC sent `25 4d 72 63` (lab
+   2026-11-13).
 2. Gen-5 frame: id 1 + GSTRING account + GSTRING password.
+
+With `--rc classic` the handshake is the 2002/05/02 RC's: plain zlib both
+ways, id 0 + `rc` and the same id 1 in **one** frame, as rc141 sends them
+(`0017 78da53284ae65254cd494c2a4a069105e55c0031c2058f`, inflated
+` rc\n!%labrc%labpw\n`). Sent as two frames, the listserver answers the lone
+id 0 as a login for `player` and then answers the real login too, so the
+list arrives twice (seihai-rc live run, 2026-11-13). Its list comes back without type
+tags. RC3 instead sends a game client's id 7 with `G3D30123` and the list
+name `rc2`; `seihai-rc` does not send that form.
 
 Answer (gen-5 frames): id 0 server list (count, then per server 8 GSTRINGs:
 type tag + name, language, description, URL, version, players, host, port),
@@ -166,7 +192,7 @@ one item per line, each quoted with `"` doubled, joined with commas;
 | Ban set | 88 `RC_PLAYERBANSET`: GSTRING account, GCHAR banned, then the reason tokenized | no reply; `players ban --set` reads it back with 87 |
 | Rights get | 83 `RC_PLAYERRIGHTSGET`: the account as the rest of the line | 62: GSTRING account, GINT5 rights, GSTRING IP range, GSHORT length, then that many bytes of folder rights tokenized |
 | Rights set | 84 `RC_PLAYERRIGHTSSET`: same as 62 | no reply; `players rights --set` reads them back with 83 |
-| Props get | 73 `RC_PLAYERPROPSGET2`: GSHORT player id | 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR props length N, N bytes of props, GSHORT flag count and a GSTRING per flag, GSHORT opened-chest count, GCHAR weapon count, a GSTRING per weapon |
+| Props get | 73 `RC_PLAYERPROPSGET2`: GSHORT player id | 72: GSHORT player id, GSTRING account, GSTRING world, GCHAR props length N, N bytes of props, GSHORT flag count and a GSTRING per flag, GSHORT opened-chest count and a GSTRING per chest (GCHAR x, GCHAR y, the level name), GCHAR weapon count, a GSTRING per weapon |
 | Props get by account | 74 `RC_PLAYERPROPSGET3`: GSTRING account, then an empty GSTRING | 72, as above, with player id 0 |
 | Props set | 76 `RC_PLAYERPROPSSET2`: GSTRING account (no player id), GSTRING world, GCHAR length N, N bytes of props, the same tail as 72, then a GCHAR 0 | no reply; `players props --set` reads them back with 73 or 74 |
 
@@ -182,9 +208,11 @@ Props are read with `seihai-core`'s player prop table. The tail after
 the props was settled by a second capture (2026-11-04,
 `docs/lab/2026-11-04-rc-props-set.md`): the real RC sent a flag as GSHORT
 1 then the GSTRING `labflag=1`, so the first GSHORT counts flags and the
-second opened chests. Only a chest count of 0 has been seen, so
-`players props` does not read the weapons after a non-zero one, and a set
-from such a reply is refused.
+second opened chests. A third capture (2026-11-13,
+`docs/lab/2026-11-13-archived-rc-captures.md`), of an account with two
+`CHEST` lines, showed each chest as a GSTRING whose body is GCHAR x,
+GCHAR y and the level name: `35 3e 34 onlinestartlocal.nw` is x 30, y 20.
+The 2004 RC sent both chests back unchanged.
 
 Both captured 76s carry the same props, in this order: 1 to 11, 13, 15,
 16, 18, 20 to 23, 26 to 29, 32 and 35. They leave out 0 (nickname), 30
@@ -192,15 +220,18 @@ Both captured 76s carry the same props, in this order: 1 to 11, 13, 15,
 21 to 23 as empty when the 72 had none, and send 29 (online seconds) as
 0; the fork keeps its own online seconds. `seihai-rc` builds 76 the same
 way from the 72 it just read, with the user's changes, and from the
-captured 72 it rebuilds the captured 76 byte for byte.
+captured 72 it rebuilds the captured 76 byte for byte. The 2026-11-13
+capture adds two rules, both followed: the RC sends the flags sorted (the
+72 had `quest.done=yes, labflag=1`, the 76 `labflag=1, quest.done=yes`),
+and it sends status (18) without the paused bit (21 went back as 20).
 
 A 76 replaces the stored flags with the ones it carries. Until
 2026-11-04 the fork's 72 always had a flag count of 0, because it dropped
 every flag when it loaded an account, so any props set through it, the
 real RC's included, dropped the account's flags. The fork now keeps them
 and its 72 carries them (seihai-gserver-v2 `CHANGES-SEIHAI.md`, checked
-there with a real 2.22 RC); `seihai-rc` has not been re-run against that
-fork. `players props --set` still warns when a reply has no flags, since
+there with a real 2.22 RC, and with the 2004 RC on 2026-11-13: both
+`FLAG` and both `CHEST` lines stayed after a set). `players props --set` still warns when a reply has no flags, since
 any server that stores flags it does not send would drop them.
 
 The reason in 64 is read as tokenized text. The fork at `f585ca6` stopped
@@ -217,13 +248,18 @@ with `seihai-rc`: `docs/lab/2026-11-04-rc-accounts.md`.
 | Action | Client to server | Server to client |
 |---|---|---|
 | List | 72 `RC_ACCOUNTLISTGET`: GSTRING name pattern (`%` matches any), GSTRING conditions (`adminlevel>0`, may be empty) | 70: a GSTRING per account to the end; empty when none match |
-| Get | 77 `RC_ACCOUNTGET`: the account as the rest of the line | 73: GSTRING account, GSTRING password (empty), GSTRING e-mail, GCHAR banned, GCHAR load only, GCHAR admin level, GSTRING admin worlds, one byte (0x20 in every capture), GSTRING ban reason tokenized |
-| Set | 78 `RC_ACCOUNTSET`: as 73 without the byte before the reason; an empty password leaves it | no reply; `accounts set` reads back with 77 |
+| Get | 77 `RC_ACCOUNTGET`: the account as the rest of the line | 73: GSTRING account, GSTRING password (empty), GSTRING e-mail, GCHAR banned, GCHAR load only, GCHAR admin level, GSTRING admin worlds, GSTRING ban length, GSTRING ban reason tokenized |
+| Set | 78 `RC_ACCOUNTSET`: as 73 without the ban length; an empty password leaves it | no reply; `accounts set` reads back with 77 |
 | Add | 70 `RC_ACCOUNTADD`: as 78 | no reply; `accounts add` reads back with 77 |
 | Delete | 71 `RC_ACCOUNTDEL`: the account as the rest of the line | no reply; `accounts delete` lists the name |
+| Reset | 75 `RC_PLAYERPROPSRESET`: the account as the rest of the line (2004 RC, after a confirm dialog, 2026-11-13) | an RC chat line `<rc> has reset the attributes of account: <account>` |
 
 The RC's dialog has a ban time, but the RC sent none, even with one
-typed in. `seihai-rc` sends none either. The fork answers a get or list
+typed in. `seihai-rc` sends none either. The fork sends it in 73 as a
+GSTRING: empty in the 2026-11-04 captures, `3600` with `BANLENGTH 3600`
+in the account file (2026-11-13), which the 2004 RC showed as the ban
+time. `accounts get` prints it as `ban length`. In 1999 to 2002 RCs
+(GSERV019 to 023) the list and get are the same 72/70 and 77/73. The fork answers a get or list
 sent right after an add or delete with what it had before, so those two
 commands wait `--settle` ms before reading back. The fork used to drop
 load only, admin level and admin worlds from 78 and 70; it now keeps them
@@ -283,9 +319,16 @@ itself. Give one of the two, not both.
 ### NPC, class and weapon commands
 
 GINT3 is three GCHARs, high 7 bits first. A GSTRING is a GCHAR length and
-then the bytes. A line feed ends a message, so a script that contains one
-is not sent. The raw-data path for a large set (ids 109, 113 and 117) still
-needs a lab check.
+then the bytes. A line feed ends a message, so no script carries one: the
+2004 RC and RC3 (lab 2026-11-13, `docs/lab/2026-11-13-archived-rc-captures.md`)
+send NPC and class scripts and NPC flags tokenized, one item per line, and
+weapon scripts with each line break as `0xA7`. Tokenized here is the RCs'
+own form: an item is quoted only when it starts with a quote or holds a
+space, a byte outside 33..126, a comma or a slash, so `}` and
+`labnpcflag=1` stay bare. The server's tokenized replies (157, 160, 161,
+162) are read back into lines. Every set in that run, an 8800-byte and a
+21232-byte weapon included, went as one ordinary message: no raw-data
+path.
 
 There is no NPC-list or class-list request in the notes. After login this
 client waits `--settle` ms and reads what arrived.
@@ -293,27 +336,33 @@ client waits `--settle` ms and reads what arrived.
 | Action | Client to server | Server to client |
 |---|---|---|
 | NPC list | (none) | 158 `NC_NPCADD`: GINT3 id, then any subset of GCHAR 50 + GSTRING name, GCHAR 51 + GSTRING type, GCHAR 52 + GSTRING level, in any order. 159 `NC_NPCDELETE`: GINT3 id, and only when those three bytes are the whole payload |
-| NPC get | 103 `NC_NPCGET`: GINT3 id | 157 `NC_NPCATTRIBUTES`: the rest of the line, a variables dump whose lines are joined by commas. The fork answers 103 with 157 (lab run 2026-11-12). If 157 does not arrive the command fails and names what did |
-| NPC script | 106 `NC_NPCSCRIPTGET`: GINT3 id | 160 `NC_NPCSCRIPT`: GINT3 id, then the script |
-| NPC set | 109 `NC_NPCSCRIPTSET`: GINT3 id, then the script | no reply id is named. The command finishes when the link stays up |
-| NPC delete | 104 `NC_NPCDELETE`: GINT3 id | waits for 159 for that id |
+| NPC get | 103 `NC_NPCGET`: GINT3 id | 157 `NC_NPCATTRIBUTES`: the variables dump tokenized, one item per line, no id |
+| NPC script | 106 `NC_NPCSCRIPTGET`: GINT3 id | 160 `NC_NPCSCRIPT`: GINT3 id, then the script tokenized |
+| NPC set | 109 `NC_NPCSCRIPTSET`: GINT3 id, then the script tokenized | an RC chat line `NPC script of <name> updated by <rc>` |
+| NPC add | 111: `name,id,type,scripter,level,x,y` tokenized | 158 for the new NPC, to every NC, and an RC chat line. A level that does not exist gives an empty 52 |
+| NPC reset | 105: GINT3 id | 29: GINT3 id, and an RC chat line |
+| NPC warp | 107: GINT3 id, GCHAR x × 2, GCHAR y × 2, then the level as the rest of the line | none |
+| NPC flags | 108: GINT3 id | 161: GINT3 id, then the flags tokenized |
+| NPC flags set | 110: GINT3 id, then the flags tokenized | an RC chat line per flag |
+| NPC delete | 104 `NC_NPCDELETE`: GINT3 id | 159 for that id. The fork at `a3b6ac23` sent it twice (seihai-gserver-v2 #63 fixes that) |
+| Update level | 62 on the **RC** socket: GSHORT count, a GSTRING per level | 159 on the NC socket for each NPC in the level |
 | Class list | (none) | 163 `NC_CLASSADD`: the rest of the line is one class name |
-| Class get | 112 `NC_CLASSEDIT`: the class name as the rest of the line | 162 `NC_CLASSGET`: GSTRING name, then the script |
-| Class set | 113 `NC_CLASSADD`: GSTRING name, then the script | no reply id is named |
-| Class delete | 119 `NC_CLASSDELETE`: the class name as the rest of the line | 188: the class name as the rest of the line, sent only when the class existed. The fork reads and writes the bare name (lab run 2026-11-12); a GSTRING name got the RC chat line `error: <len byte><name> does not exist on this server!` |
-| Weapon list | 115 `NC_WEAPONLISTGET`: no payload | 167: repeated GSTRING names |
-| Weapon get | 116 `NC_WEAPONGET`: the weapon name as the rest of the line | 33: GSTRING name, GCHAR 0, GSTRING image, GCHAR 1, GSHORT length, then that many script bytes (the `PLO_NPCWEAPONADD` shape; the fork sends it to this NC, lab run 2026-11-12). Script lines are joined by `0xA7` |
-| Weapon set | 117: GSTRING name, GSTRING image, then the script | no reply id is named |
-| Weapon delete | 118: the weapon name as the rest of the line | no reply id is named |
+| Class get | 112 `NC_CLASSEDIT`: the class name as the rest of the line | 162 `NC_CLASSGET`: GSTRING name, then the script tokenized |
+| Class set | 113 `NC_CLASSADD`: GSTRING name, then the script tokenized | 163 with the bare name, and an RC chat line |
+| Class delete | 119 `NC_CLASSDELETE`: the class name as the rest of the line | 188: the class name as the rest of the line, sent only when the class existed |
+| Weapon list | 115 `NC_WEAPONLISTGET`: no payload | 167: repeated GSTRING names, always the whole list. A set or delete sends it again; the fork at `a3b6ac23` sent that only to the NC that made the change (#63 fixes that) |
+| Weapon get | 116 `NC_WEAPONGET`: the weapon name as the rest of the line | To `NCL11012`, 33: GSTRING name, GCHAR 0, GSTRING image, GCHAR 1, a two-byte length, then the script joined by `0xA7`. The length is a GSHORT, high 7 bits first, but above 16383 the fork's high byte runs past 7 bits: 21212 went as `c5 7c`, and the 2004 RC read it, so the high byte is not masked. To `NCL21075` (RC3), 192: GSTRING name, GSTRING image, then the script joined by `0xA7` as the rest of the line, no length |
+| Weapon set | 117: GSTRING name, GSTRING image, then the script joined by `0xA7`, not tokenized, no length | an RC chat line; a new weapon also gets 167 |
+| Weapon delete | 118: the weapon name as the rest of the line | an RC chat line and 167 |
 
-Still needs a lab check, and so is not turned into fields:
+Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
+192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s
+on the NC socket as a keepalive; the fork does not answer it.
 
-- Id 158 with a property other than 50, 51 or 52. The whole payload stays raw. Whether a missing property clears a value already stored also still needs a lab check; this client leaves the stored value.
+Not seen, and so not turned into fields:
+
+- Id 158 with a property other than 50, 51 or 52. The whole payload stays raw. No UI path in the 2004 RC or RC3 produced one. This client leaves a stored value when a property is missing.
 - Id 159 with bytes after the GINT3.
-- Ids 112, 116 and 118. The notes write `str` where a length byte was seen, and they do not write it for these three, so this client sends the name as the rest of the line. A lab check should confirm there is no length byte.
-- Id 33 when the GSHORT length runs past the message. A GINT3 length for a large script still needs a lab check and is not tried. A script byte that is a line feed still needs a lab check: the frame reader stops at a line feed.
-- Each id 167 replaces the stored weapon list. Whether a second one is a full list or an addition still needs a lab check. The notes describe the packet as the list, so this client treats each one as the whole list.
-- Attribute text, class names and scripts are the rest of the one message that carried them. A line feed inside that text still needs a lab check.
 
 ## File link (list, get, put)
 
@@ -345,18 +394,21 @@ still in front of the file, and the fork answered id 67, `Uploaded file rc-probe
 | Folder line | 67 `RC_FILEBROWSER_MESSAGE` | `Folder changed to ` and the folder, before id 66. Any other id 67 is a refusal. |
 | Get | 92 `RC_FILEBROWSER_DOWN` | The path, the rest of the line. No length byte. The fork joins it to the folder from the last list. |
 | File | 100 raw, then 102 `PLO_FILE` | `GINT5` modification time, `GCHAR` name length, the name, the file bytes. The raw length counts one line feed after the file; that byte is not part of the file. |
-| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. |
+| Put | 50 raw, then 93 `RC_FILEBROWSER_UP` | `GSTRING` name, then the file bytes. No size field. As for id 100, the raw length counts one line feed after the message (32015 for a 32014-byte 93 from the 2004 RC), and the block ends with it. The fork with #63 drops that byte; a count without it cost the file's own last byte in the seihai-rc live run of 2026-11-13. |
 | Stored | 67 `RC_FILEBROWSER_MESSAGE` | `Uploaded file ` and the name. Any other id 67 is a refusal. |
 
-| Move | 96 `RC_FILEBROWSER_MOVE` | `GSTRING` target folder, then the file name in the folder from the last list as the rest of the line. The fork reads this order and answers id 67 `Moved file <from> to <to>` (lab run 2026-11-12); the earlier reading, name first, got `Error moving file`. Not captured from a real RC. |
-| Delete | 97 `RC_FILEBROWSER_DELETE` | The file name in the folder from the last list, the rest of the line. The fork answers id 67 `Deleted file <name>` (lab run 2026-11-12). Not captured from a real RC. |
-| Rename | 98 `RC_FILEBROWSER_RENAME` | `GSTRING` old name, `GSTRING` new name, both in the folder from the last list. The fork answers id 67 `Renamed file <old> to <new>` (lab run 2026-11-12). Not captured from a real RC. |
-| Folder delete | 160 `RC_FOLDERDELETE` | **check** The folder, the rest of the line. |
+| Move | 96 `RC_FILEBROWSER_MOVE` | `GSTRING` target folder, then the file name in the folder from the last list as the rest of the line. The fork answers id 67 `Moved file <from> to <to>`. |
+| Delete | 97 `RC_FILEBROWSER_DELETE` | The file name in the folder from the last list, the rest of the line, with no confirm dialog in the 2004 RC. The fork answers id 67 `Deleted file <name>`. |
+| Rename | 98 `RC_FILEBROWSER_RENAME` | `GSTRING` old name, `GSTRING` new name, both in the folder from the last list. The fork answers id 67 `Renamed file <old> to <new>`. |
+| Folder delete | 160 `RC_FOLDERDELETE` | The folder with a trailing `/`, the rest of the line (`c0 world/labgone/` from RC3). `seihai-rc` adds the slash when it is missing. The fork at `a3b6ac23` sent 16 and dropped the link both for a folder that was not empty and after removing an empty one (#63 fixes that). With #63 it answers 67 `Folder world/labdir/ has been removed.`, then 65 and 66 `/`. A later 90 of the deleted folder still answers `Folder changed to` and an empty 66 when the account's rights cover it, so `seihai-rc files rmdir` reads the 67 line instead of listing again. |
 
-The four rows are not captured from a real RC; move, delete and rename are confirmed against the fork, folder delete is still **check**. What the server
-answers to them is not relied on either: `seihai-rc files mv|rename|rm|rmdir`
-prints any id 67 lines and lists the folder again to see the result. A
-list of a folder that is gone gets a refusal, or no answer from the fork.
+All four match real RCs: move and delete from the 2004 RC, rename and
+folder delete from RC3 (lab 2026-11-13). After each, the real RC sends 90
+for the current folder again. What the server
+answers to mv, rename and rm is not relied on: `seihai-rc files mv|rename|rm`
+prints any id 67 lines and lists the folder again to see the result.
+`rmdir` goes by the 67 line (see the table), and lists again only when the
+server sends no 67 at all.
 
 Id 65 `RC_FILEBROWSER_DIRLIST` is the reply to id 89 `START`, which this
 client does not send. Not sent, layout unknown: 91 `END`.
@@ -364,19 +416,18 @@ client does not send. Not sent, layout unknown: 91 `END`.
 ### Large files
 
 One frame's length is a `u16`, so a file over 60 KiB (`MAX_FILE_BYTES`)
-travels in pieces. The layouts are the ones the gserver-v2 fork reads and
-writes, taken from its behaviour; no real RC has been captured doing this
-(**check**).
+travels in pieces. RC3 put an 81200-byte file and the 2004 RC got a
+50000-byte one this way (lab 2026-11-13).
 
 | Direction | Ids | Layout |
 |---|---|---|
-| Put | 155 `RC_LARGEFILESTART` | **check** The name, the rest of the line. |
-| | 93 inside 50, repeated | **check** Ordinary put blocks, `GSTRING` name (the same name), then at most 32000 bytes of the file. The fork keeps them for that name and does not answer each one. |
-| | 156 `RC_LARGEFILEEND` | **check** The name, the rest of the line. The fork stores the joined file in the folder from the last list and answers id 67 `Uploaded large file ` and the name. |
-| Get | 68 `PLO_LARGEFILESTART` | **check** The name, the rest of the line. |
-| | 84 `PLO_LARGEFILESIZE` | **check** `GINT5` total size. 2.3 and later servers; an older one leaves it out. |
+| Put | 155 `RC_LARGEFILESTART` | The name, the rest of the line. |
+| | 93 inside 50, repeated | Ordinary put blocks, `GSTRING` name (the same name), then at most 32000 bytes of the file. The fork keeps them for that name and does not answer each one. |
+| | 156 `RC_LARGEFILEEND` | The name, the rest of the line. The fork stores the joined file in the folder from the last list and answers id 67 `Uploaded large file ` and the name. |
+| Get | 68 `PLO_LARGEFILESTART` | The name, after a 92 for it, the rest of the line. |
+| | 84 `PLO_LARGEFILESIZE` | `GINT5` total size (`74 20 20 23 26 70` = 50000). 2.3 and later servers; an older one leaves it out. |
 | | 102 inside 100, repeated | The file block above, at most 32000 bytes each. |
-| | 69 `PLO_LARGEFILEEND` | **check** The name, the rest of the line. |
+| | 69 `PLO_LARGEFILEEND` | The name, the rest of the line. |
 
 The fork sends any file over 32000 bytes as a large file, so a get of a
 file between 32000 bytes and 60 KiB comes in pieces too. `seihai-rc` puts a
@@ -391,9 +442,19 @@ refused: a put name is one `GCHAR`, which cannot say more.
 
 ## Server options, folder config, server flags (stage 4)
 
-All **check**: no real RC was captured getting or setting these. Ids 51 to
-54 meant account actions in RC 1.33; these are the meanings from the
-2002/05/02 RC on.
+Captured from the 2004 RC, get and set (lab 2026-11-13). Ids 51 to 54
+meant account actions in RC 1.33: rc133 (`GSERV014`) still sends 53 for
+an account add, with GSTRING account, GSTRING password and a props block.
+These are the meanings from the 2002/05/02 RC on. Each set is answered
+with an RC chat line (`<rc> has updated the server options.`, `<rc>
+updated the folder config.`, `<rc> has updated the server flags.`).
+
+The fork at `a3b6ac23` sent 76 and 77 with a line quoted only for a comma
+or a quote. The real RC splits an unquoted item at its spaces too, so one
+open, edit and set from it took `serveroptions.txt` from 572 to 2476 lines
+(seihai-gserver-v2 #63 fixes that). `seihai-rc` reads an unquoted item up
+to the next comma, so it kept the lines whole either way, and it sends
+every line quoted.
 
 | What | Get | Reply | Set | Payload |
 |---|---|---|---|---|
