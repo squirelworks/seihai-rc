@@ -114,3 +114,18 @@ minor point.)
 ## Not changed
 
 No Rust code was changed for this run.
+
+## Re-run after 4a01ad5
+
+seihai-rc rebuilt at `4a01ad5` (PR #45). The same lab, the fork at `a1859ba`,
+listserver `ae213fc`, absolute paths. Relay log `run7`.
+
+| Command | Result | Evidence |
+|---|---|---|
+| `servers --listserver 127.0.0.1:14922 --rc classic` | **pass** | One frame for the handshake and the login, `0017 789c53284ae65254cd494c2a4a069105e55c0031c2058f` = `" rc\n!%labrc%labpw\n"`; one 0 and one 2 (`Welcome to RC Lab, labrc.`) per run. With both servers registered: `1) [-] My Server  127.0.0.1:14802 …` and `2) [-] Seihai NPC demo  127.0.0.1:14804 …`, each once. (A first run 4 s after start listed only My Server, once: `npcdemo` had not registered yet.) |
+| `files put` of the 75400-byte file | **pass** | Raw counts `32013, 32013, 11413` (the 93 message + its line feed); `sent 75400 bytes`; stored 75400 bytes, sha256 `0abd857a51b1043c1a1e7a924eeff4031c43c3bf72ec474bf90d9195721b841e` on both sides |
+| `files put` of a 42-byte file ending in a line feed | **pass** | Raw count 54; stored 42 bytes, sha256 `3a249ddfa12648095c1680aab8d0f3a65a430c334ed9d57b46ab73381977b41d` on both sides |
+| `files rmdir world/labdir/ --yes` (empty) | **pass** | `[server] Folder world/labdir/ has been removed.`, `deleted folder world/labdir/`, exit 0; the folder is gone from disk |
+
+All three failures from the first run are fixed. No Rust code was changed for
+this run.
