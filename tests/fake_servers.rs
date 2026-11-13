@@ -281,8 +281,12 @@ fn fake_listserver(refuse: bool) -> (String, thread::JoinHandle<ListSeen>) {
         let (mut s, _) = l.accept().unwrap();
         s.set_read_timeout(Some(TIMEOUT)).unwrap();
         let hs = zlib_decompress(&read_raw_frame(&mut s)).unwrap();
-        assert_eq!(hs[0] - 0x20, 5);
-        let mut codec = Codec::gen5(hs[1] - 0x20);
+        // Id 5 (gen 5, the 2004 RC) or id 0 (plain zlib, the 2002/05/02 RC).
+        let mut codec = match hs[0] - 0x20 {
+            5 => Codec::gen5(hs[1] - 0x20),
+            0 => Codec::Plain,
+            id => panic!("unexpected RC list handshake id {id}"),
+        };
         let account = split_messages(&codec.decode(&read_raw_frame(&mut s)).unwrap());
         if refuse {
             send_msgs(
@@ -326,7 +330,7 @@ fn fake_listserver(refuse: bool) -> (String, thread::JoinHandle<ListSeen>) {
 #[test]
 fn rc_list_from_listserver() {
     let (addr, h) = fake_listserver(false);
-    let reply = fetch_rc_list(&addr, "GSERV025", "labrc", "labpw", 0x11, TIMEOUT).unwrap();
+    let reply = fetch_rc_list(&addr, false, "labrc", "labpw", 0x11, TIMEOUT).unwrap();
     assert_eq!(reply.servers.len(), 2);
     assert_eq!(reply.servers[0].kind, "H");
     assert_eq!(reply.servers[0].name, "My Server");
@@ -334,9 +338,21 @@ fn rc_list_from_listserver() {
     let s = pick(&reply.servers, "classic").unwrap();
     assert_eq!((s.host.as_str(), s.port), ("127.0.0.1", 14803));
     let (hs, account) = h.join().unwrap();
-    assert_eq!(&hs[1..], b"1GSERV025\n");
+    // The 2004 RC's handshake (lab 2026-11-13): key, then `rc`.
+    assert_eq!(&hs[1..], b"1rc\n");
     assert_eq!(account.len(), 1);
     assert_eq!(account[0].id, 1);
+    assert_eq!(account[0].payload, b"%labrc%labpw");
+}
+
+#[test]
+fn rc_list_from_listserver_classic() {
+    let (addr, h) = fake_listserver(false);
+    let reply = fetch_rc_list(&addr, true, "labrc", "labpw", 0x11, TIMEOUT).unwrap();
+    assert_eq!(reply.servers.len(), 2);
+    let (hs, account) = h.join().unwrap();
+    // The 2002/05/02 RC's handshake: id 0, then `rc`, plain zlib after it.
+    assert_eq!(hs, b" rc\n");
     assert_eq!(account[0].payload, b"%labrc%labpw");
 }
 
@@ -530,7 +546,7 @@ fn servers_command_uses_the_secure_handshake() {
 #[test]
 fn rc_list_refused() {
     let (addr, h) = fake_listserver(true);
-    match fetch_rc_list(&addr, "GSERV025", "nobody", "x", 0x11, TIMEOUT) {
+    match fetch_rc_list(&addr, false, "nobody", "x", 0x11, TIMEOUT) {
         Err(ListError::Refused(why)) => assert_eq!(why, "Account does not exist."),
         other => panic!("wrong result: {other:?}"),
     }

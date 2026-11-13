@@ -37,22 +37,22 @@
 //!   then the file name in the folder from the last list as the rest of the
 //!   line. seihai-gserver-v2 reads this order (lab run 2026-11-12).
 //! - Delete, id [`pli::RC_FILEBROWSER_DELETE`] (97): the file name in the
-//!   folder from the last list, as the rest of the line. **check**
+//!   folder from the last list, as the rest of the line.
 //! - Rename, id [`pli::RC_FILEBROWSER_RENAME`] (98): two `GSTRING`s, the old
-//!   and the new name, both in the folder from the last list. **check**
-//! - Folder delete, id [`pli::RC_FOLDERDELETE`] (160): the folder as the rest
-//!   of the line. **check**
+//!   and the new name, both in the folder from the last list.
+//! - Folder delete, id [`pli::RC_FOLDERDELETE`] (160): the folder and a
+//!   trailing `/` as the rest of the line.
 //!
-//! The four layouts above are not captured from a real RC yet. The server's
-//! answer to them is not relied on: [`Session::file_action`] returns the id
+//! All four match real RCs (the 2004 RC and RC3, lab 2026-11-13). The
+//! server's answer to them is not relied on: [`Session::file_action`] returns the id
 //! 67 lines it sends, and the command line lists the folder again to see
 //! whether the change happened.
 //!
 //! # Large files
 //!
 //! One frame length is a `u16`, so a file over [`MAX_FILE_BYTES`] travels in
-//! pieces. Layouts are the ones the gserver-v2 fork reads and writes; no
-//! real RC has been captured doing this yet (**check**).
+//! pieces. The layouts match RC3's put of 81200 bytes and the 2004 RC's get
+//! of 50000 bytes (lab 2026-11-13).
 //!
 //! - Put: id [`pli::RC_LARGEFILESTART`] (155) with the name as the rest of
 //!   the line, then the file as ordinary put blocks (id 93 inside id 50) of at
@@ -119,18 +119,18 @@ pub mod pli {
     pub const RC_FILEBROWSER_DOWN: u8 = 92;
     /// Send a file. The message sits inside [`super::PLI_RAWDATA`].
     pub const RC_FILEBROWSER_UP: u8 = 93;
-    /// Move a file to another folder. See [`super::move_message`]. **check**
+    /// Move a file to another folder. See [`super::move_message`].
     pub const RC_FILEBROWSER_MOVE: u8 = 96;
-    /// Delete a file. See [`super::delete_message`]. **check**
+    /// Delete a file. See [`super::delete_message`].
     pub const RC_FILEBROWSER_DELETE: u8 = 97;
-    /// Rename a file. See [`super::rename_message`]. **check**
+    /// Rename a file. See [`super::rename_message`].
     pub const RC_FILEBROWSER_RENAME: u8 = 98;
-    /// A large put starts. The name is the rest of the line. **check**
+    /// A large put starts. The name is the rest of the line.
     pub const RC_LARGEFILESTART: u8 = 155;
     /// A large put ends and the server stores it. The name is the rest of
-    /// the line. **check**
+    /// the line.
     pub const RC_LARGEFILEEND: u8 = 156;
-    /// Delete a folder. See [`super::folder_delete_message`]. **check**
+    /// Delete a folder. See [`super::folder_delete_message`].
     pub const RC_FOLDERDELETE: u8 = 160;
 }
 
@@ -364,12 +364,12 @@ pub fn move_message(name: &str, to_folder: &str) -> Result<Vec<u8>, FileError> {
     Ok(message(pli::RC_FILEBROWSER_MOVE, &p))
 }
 
-/// Delete: the name as the rest of the line. **check**
+/// Delete: the name as the rest of the line.
 pub fn delete_message(name: &str) -> Result<Vec<u8>, FileError> {
     Ok(message(pli::RC_FILEBROWSER_DELETE, &name_bytes(name)?))
 }
 
-/// Rename: `GSTRING` old name, `GSTRING` new name. **check**
+/// Rename: `GSTRING` old name, `GSTRING` new name.
 pub fn rename_message(old: &str, new: &str) -> Result<Vec<u8>, FileError> {
     let mut p = Vec::new();
     push_gstring(&mut p, &name_bytes(old)?);
@@ -377,9 +377,15 @@ pub fn rename_message(old: &str, new: &str) -> Result<Vec<u8>, FileError> {
     Ok(message(pli::RC_FILEBROWSER_RENAME, &p))
 }
 
-/// Folder delete: the folder as the rest of the line. **check**
+/// Folder delete: the folder with a trailing `/`, as the rest of the line.
+/// RC3 sent `world/labgone/` from its folder menu (lab 2026-11-13); a
+/// folder given without the slash gets one.
 pub fn folder_delete_message(folder: &str) -> Result<Vec<u8>, FileError> {
-    Ok(message(pli::RC_FOLDERDELETE, &path_bytes(folder, false)?))
+    let mut bytes = path_bytes(folder, false)?;
+    if bytes.last() != Some(&b'/') {
+        bytes.push(b'/');
+    }
+    Ok(message(pli::RC_FOLDERDELETE, &bytes))
 }
 
 /// `("world/", "a.nw")` for `world/a.nw`, `("", "a.nw")` for `a.nw`. The
@@ -738,8 +744,12 @@ mod tests {
         assert_eq!(delete_message("a.nw").unwrap(), b"\x81a.nw");
         // 98: two GSTRINGs.
         assert_eq!(rename_message("a.nw", "b.nw").unwrap(), b"\x82$a.nw$b.nw");
-        // 160: the folder as the rest of the line.
+        // 160: the folder and a trailing slash as the rest of the line.
         assert_eq!(folder_delete_message("old/").unwrap(), b"\xc0old/");
+        assert_eq!(
+            folder_delete_message("world/labgone").unwrap(),
+            b"\xc0world/labgone/"
+        );
         assert!(delete_message("world/a.nw").is_err());
         assert!(rename_message("a.nw", "../b.nw").is_err());
         assert!(move_message("a.nw", "../x").is_err());

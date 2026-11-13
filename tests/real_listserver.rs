@@ -103,7 +103,7 @@ fn rc_list_from_the_real_listserver_shows_the_hidden_server() {
     wait_listed(&run, 2);
     let addr = run.client_addrs[0].to_string();
 
-    let reply = fetch_rc_list(&addr, "GSERV025", "labrc", "labpw", 0x35, TIMEOUT).unwrap();
+    let reply = fetch_rc_list(&addr, false, "labrc", "labpw", 0x35, TIMEOUT).unwrap();
     let got: Vec<(&str, &str)> = reply
         .servers
         .iter()
@@ -144,7 +144,7 @@ fn wrong_password_is_refused_by_the_real_listserver() {
     let dir = Scratch::new("refused");
     let run = start(&dir);
     let addr = run.client_addrs[0].to_string();
-    match fetch_rc_list(&addr, "GSERV025", "labrc", "nope", 0x35, TIMEOUT) {
+    match fetch_rc_list(&addr, false, "labrc", "nope", 0x35, TIMEOUT) {
         Err(ListError::Refused(why)) => assert!(!why.is_empty()),
         other => panic!("expected a refusal, got {other:?}"),
     }

@@ -100,12 +100,16 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       back. Evidence: a second real-RC capture and `seihai-rc` live against
       the fork, offline and online (`docs/lab/2026-11-04-rc-props-set.md`);
       the builder rebuilds the captured 76 in a unit test.
+- [x] Opened chests in 72 and 76: a GSHORT count, then each chest as a
+      GSTRING of GCHAR x, GCHAR y and the level. A props set sends them
+      back unchanged, flags sorted and status without the paused bit, as
+      the 2004 RC did; the builder rebuilds that RC's 76 byte for byte.
+      Evidence: `docs/lab/2026-11-13-archived-rc-captures.md` and a unit test.
 - [ ] Props set: more names than max-hearts, hearts, gralats, arrows,
-      bombs, glove and ap; flags and weapons as options; chests once a
-      non-zero count is captured.
+      bombs, glove and ap; flags and weapons as options.
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
-      with a real 2.22 RC). `seihai-rc` has not been re-run against it.
+      with a real 2.22 RC, and with the 2004 RC on 2026-11-13).
 - [x] List RCs, for v0.2.0 (owner's call, 2026-11-12): `seihai-rc rcs list`.
       No RC client from 1.21 to 2.05 sends id 65 and no server answers it:
       RCs are listed through the normal player list, where an RC is a player
@@ -120,8 +124,12 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       against the fork, one field per apply, and `seihai-rc` live against
       the fork (`docs/lab/2026-11-04-rc-accounts.md`); each builder has a
       byte test from the capture and a case in `tests/fake_servers.rs`.
-- [ ] The byte before the ban reason in 73 (most likely the ban time).
-      Only 0x20 has been seen; a 73 with another value is not read.
+- [x] The byte before the ban reason in 73 is a GSTRING ban length
+      (`3600` with `BANLENGTH 3600`; the RC never sends it back).
+      `accounts get` prints it. Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`.
+- [x] Account reset (75): `accounts reset ACCOUNT --yes`, the account as
+      the rest of the line, as the 2004 RC sends it from its account menu.
+      Evidence: `docs/lab/2026-11-13-archived-rc-captures.md` (second pass) and a unit test.
 - [x] Fork: keep load only, admin level and admin worlds from 78 and 70.
       Done in seihai-gserver-v2 (`CHANGES-SEIHAI.md`). `seihai-rc` has not
       been re-run against it.
@@ -154,8 +162,9 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       and lists again to see whether the change happened. `rm` and `rmdir`
       need `--yes`. Evidence: `tests/files_cli.rs` (fake gserver) and unit
       tests. No real client.
-- [ ] Capture 96, 97, 98 and 160 from a real 2.22 RC against the fork and
-      fix the layouts if they differ (lab).
+- [x] Capture 96, 97, 98 and 160 from a real RC: move and delete from the
+      2004 RC, rename and folder delete from RC3. All matched; 160 carries
+      a trailing `/`, which `files rmdir` now adds. Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`.
 - [x] `server options|folders|flags [--set-file PATH]`: get 51/53/68,
       replies 76/77/61, set 52/54/69. Options and folder config as
       tokenized text, flags as a count and one `GSTRING` each, all
@@ -163,14 +172,17 @@ Note: ids 51 to 54 meant account actions in RC 1.33; use the modern meanings
       the line counts before and after, and fails if the server kept
       something else. Evidence: `tests/server_cli.rs` (fake gserver) and
       unit tests. No real client.
-- [ ] Capture 51 to 54 and 68/69 from a real 2.22 RC against the fork and
-      fix the layouts if they differ (lab).
+- [x] Capture 51 to 54 and 68/69 from a real RC: the 2004 RC, get and
+      set. The layouts matched; the fork's unquoted 76/77 broke the real
+      RC's set (seihai-gserver-v2 #63). Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`.
 - [x] Large-file packets: put as 155, put blocks of 32000 bytes, 156;
       get joins 68, 84, the id 102 pieces and 69. Layouts **check**, from
       the fork's behaviour. Evidence: `tests/file_link.rs` (fake gserver)
       and unit tests. No real client.
-- [ ] Capture 155/156 from a real 2.22 RC putting a file over 60 KiB, and a
-      get of one over 32000 bytes against the fork (lab).
+- [x] Capture 155/156 from a real RC putting a file over 60 KiB (RC3,
+      81200 bytes), and a get of one over 32000 bytes (2004 RC, 50000
+      bytes). The layouts matched; the fork stored each put piece one byte
+      long (#63). Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`.
 
 ## Stage 5: NPC Control
 
@@ -195,11 +207,16 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       GCHAR 0 after the name and a GCHAR 1 after the image: both corrected
       to what the fork does in the run of 2026-11-12 (`docs/lab/2026-11-12-fork-lab-pass.md`), where NC
       login, NPC list/get/script, class list/set/get/delete and weapon
-      list/get/set/delete all worked against the fork. NPC set and delete
-      were not run. A script that contains a line break is not sent. A
-      weapon script whose GSHORT length does not fit the message is not
-      parsed. See `docs/PROTOCOL.md`. Evidence: `tests/nc_commands.rs` and
-      the fork run.
+      list/get/set/delete all worked against the fork. See
+      `docs/PROTOCOL.md`. Evidence: `tests/nc_commands.rs` and the fork run.
+- [x] Real-RC NC capture (2004 RC with `NCL11012`, RC3 with `NCL21075`,
+      2026-11-13): scripts and flags go tokenized, so a script may hold
+      line breaks; weapon scripts go with `0xA7` line breaks; 33's length
+      high byte is not masked (21212 = `c5 7c`); 192 is read as RC3's
+      weapon reply; 157/160/161/162 are read back into lines. New: `nc npc
+      add`, `reset`, `warp` and `flags [--set-file]` (111, 105/29, 107,
+      108/161, 110). Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`, unit tests and
+      `tests/nc_commands.rs`.
 
 ## Window
 

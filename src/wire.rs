@@ -86,6 +86,29 @@ pub fn gtokenize(lines: &str) -> String {
     seihai_core::net::gtokenize(lines)
 }
 
+/// Graal's tokenized text the way the real RCs write it (lab 2026-11-13):
+/// one item per line, quoted only when it starts with a quote or holds a
+/// byte outside 33..126, a comma or a slash; inside quotes `\` and `"` are
+/// doubled. An empty line is an empty item. Unlike [`gtokenize`], a plain
+/// word stays bare: the 2004 RC sent `}` and `labnpcflag=1` unquoted.
+pub fn rc_tokenize(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            let complex = line.starts_with('"')
+                || line
+                    .chars()
+                    .any(|c| (c as u32) < 33 || (c as u32) > 126 || c == ',' || c == '/');
+            if complex {
+                format!("\"{}\"", line.replace('\\', "\\\\").replace('"', "\"\""))
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Read tokenized text back into lines. A quoted item runs to its closing
 /// quote (`""` inside is one `"`); an unquoted item runs to the next comma.
 /// Spaces around an item are dropped. Empty text gives no lines.

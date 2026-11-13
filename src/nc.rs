@@ -14,11 +14,14 @@ use std::collections::BTreeMap;
 use std::io;
 use std::time::{Duration, Instant};
 
-use seihai_core::protocol::{read_gint3, read_gshort, Message};
+use seihai_core::protocol::{read_gint3, Message};
 
 use crate::link::{Codec, Link};
 use crate::rc::LoginError;
-use crate::wire::{gchar, latin1_bytes, message, push_gint3, push_gstring, read_gstring, text};
+use crate::wire::{
+    gchar, gdetokenize, latin1_bytes, message, push_gint3, push_gstring, rc_tokenize, read_gstring,
+    text,
+};
 
 /// Client type on the NPC-Control socket.
 pub const NC_LOGIN_TYPE: u8 = 3;
@@ -28,11 +31,21 @@ pub const NC_TOKEN: &str = "NCL11012";
 /// Largest value a GINT3 can carry.
 pub const GINT3_MAX: u32 = (1 << 21) - 1;
 const GSTRING_MAX: usize = 223;
+const GCHAR_MAX: u8 = 0xDF;
 
 /// Server to client: the session was refused or ended. Payload is text.
 pub const NC_DISCMESSAGE: u8 = 16;
-/// Server to client: one weapon script.
+/// Server to client: one weapon script, to an `NCL11012` client.
 pub const NC_WEAPON_SCRIPT: u8 = 33;
+/// Server to client: an NPC was reset (105). GINT3 id.
+pub const NC_NPC_RESET_NOTIFY: u8 = 29;
+/// Server to client: one NPC's flags (108). GINT3 id, then the flags
+/// tokenized.
+pub const NC_NPC_FLAGS: u8 = 161;
+/// Server to client: one weapon script, to an `NCL21075` client (RC3, lab
+/// 2026-11-13): GSTRING name, GSTRING image, then the script joined by
+/// 0xA7 as the rest of the line, with no length.
+pub const NC_WEAPON_SCRIPT2: u8 = 192;
 /// Server to client: attribute text for the NPC just asked about.
 pub const NC_NPC_ATTRIBUTES: u8 = 157;
 /// Server to client: one NPC row, added or updated.
@@ -54,6 +67,16 @@ pub const NC_CLASS_DELETE_NOTIFY: u8 = 188;
 pub const NC_NPC_GET: u8 = 103;
 /// Client to server: delete an NPC.
 pub const NC_NPC_DELETE: u8 = 104;
+/// Client to server: reset an NPC. GINT3 id.
+pub const NC_NPC_RESET: u8 = 105;
+/// Client to server: move an NPC. GINT3 id, GCHAR x × 2, GCHAR y × 2, level.
+pub const NC_NPC_WARP: u8 = 107;
+/// Client to server: ask for an NPC's flags. GINT3 id.
+pub const NC_NPC_FLAGS_GET: u8 = 108;
+/// Client to server: save an NPC's flags. GINT3 id, then the flags tokenized.
+pub const NC_NPC_FLAGS_SET: u8 = 110;
+/// Client to server: add an NPC. Tokenized `name,id,type,scripter,level,x,y`.
+pub const NC_NPC_ADD: u8 = 111;
 /// Client to server: ask for an NPC script.
 pub const NC_NPC_SCRIPT_GET: u8 = 106;
 /// Client to server: save an NPC script.
@@ -92,6 +115,8 @@ pub enum NcError {
     TooLong(&'static str),
     /// The id does not fit in a GINT3.
     BadId,
+    /// An NPC position that is not 0 to 111.5 in steps of 0.5.
+    BadPosition,
 }
 
 impl std::fmt::Display for NcError {
@@ -106,6 +131,7 @@ impl std::fmt::Display for NcError {
                 write!(f, "{what} is longer than a GSTRING ({GSTRING_MAX} bytes)")
             }
             NcError::BadId => write!(f, "NPC id does not fit in a GINT3"),
+            NcError::BadPosition => write!(f, "x and y must be 0 to 111.5 in steps of 0.5"),
         }
     }
 }
@@ -143,17 +169,38 @@ fn no_line_break(what: &'static str, value: &str) -> Result<(), NcError> {
     }
 }
 
-/// A script is the rest of one message. A line break ends that message.
-/// The notes still need a lab check before a raw-data frame is used instead.
-fn script_bytes(script: &str) -> Result<Vec<u8>, NcError> {
-    if script.chars().any(|c| c == '\n' || c == '\r') {
-        Err(NcError::NeedsLabCheck {
-            packet: "script set (109, 113, 117)",
-            field: "a script that contains a line break, and the raw-data path for a large set",
-        })
-    } else {
-        Ok(latin1_bytes(script))
+/// A script for 109 or 113, as the 2004 RC and RC3 send it (lab
+/// 2026-11-13): tokenized, one item per line, quoted when needed, so a line
+/// break never reaches the wire. A carriage return before a line feed is
+/// dropped; a final line feed adds no empty item.
+fn tokenized_script(script: &str) -> Vec<u8> {
+    let script = script.replace("\r\n", "\n");
+    let body = script.strip_suffix('\n').unwrap_or(&script);
+    if body.is_empty() {
+        return Vec::new();
     }
+    let lines: Vec<&str> = body.split('\n').collect();
+    latin1_bytes(&rc_tokenize(&lines))
+}
+
+/// The weapon-script line separator: 0xA7, Latin-1 `§`.
+pub const SCRIPT_LINE_SEP: u8 = 0xA7;
+
+/// A weapon script for 117, as both RCs send it: each line break becomes
+/// 0xA7, so a script that ends with a line break ends with 0xA7. Not
+/// tokenized, no length (lab 2026-11-13: lab9000 went out as 8800 bytes for
+/// 200 lines and came back byte for byte).
+fn weapon_script_bytes(script: &str) -> Vec<u8> {
+    let script = script.replace("\r\n", "\n").replace('\r', "\n");
+    latin1_bytes(&script)
+        .into_iter()
+        .map(|b| if b == b'\n' { SCRIPT_LINE_SEP } else { b })
+        .collect()
+}
+
+/// A 0xA7-joined weapon script back into lines joined by line feeds.
+fn weapon_script_text(bytes: &[u8]) -> String {
+    text(bytes).replace('\u{a7}', "\n")
 }
 
 fn gstring_bytes(what: &'static str, value: &str) -> Result<Vec<u8>, NcError> {
@@ -184,34 +231,107 @@ pub fn npc_delete_message(id: u32) -> Result<Vec<u8>, NcError> {
     Ok(message(NC_NPC_DELETE, &gint3(id)))
 }
 
+/// Id 105: GINT3 id. The fork answers 29 with the id and an RC chat line.
+pub fn npc_reset_message(id: u32) -> Result<Vec<u8>, NcError> {
+    check_id(id)?;
+    Ok(message(NC_NPC_RESET, &gint3(id)))
+}
+
+/// Id 107: GINT3 id, GCHAR x × 2, GCHAR y × 2 (half tiles), then the level
+/// as the rest of the line. The 2004 RC sent `39 3c npcdemo_start.nw` for
+/// 12.5, 14. No reply.
+pub fn npc_warp_message(id: u32, x: f32, y: f32, level: &str) -> Result<Vec<u8>, NcError> {
+    check_id(id)?;
+    let half = |v: f32| -> Result<u8, NcError> {
+        let h = v * 2.0;
+        if !(0.0..=f32::from(GCHAR_MAX)).contains(&h) || h.fract() != 0.0 {
+            return Err(NcError::BadPosition);
+        }
+        Ok(h as u8)
+    };
+    let mut payload = gint3(id);
+    payload.push(gchar(half(x)?));
+    payload.push(gchar(half(y)?));
+    no_line_break("level name", level)?;
+    payload.extend(latin1_bytes(level));
+    Ok(message(NC_NPC_WARP, &payload))
+}
+
+/// Id 108: GINT3 id. The reply is 161.
+pub fn npc_flags_get_message(id: u32) -> Result<Vec<u8>, NcError> {
+    check_id(id)?;
+    Ok(message(NC_NPC_FLAGS_GET, &gint3(id)))
+}
+
+/// Id 110: GINT3 id, then the flags tokenized, one per item (the 2004 RC:
+/// `labnpcflag=1,"other.flag=a b"`).
+pub fn npc_flags_set_message(id: u32, flags: &[String]) -> Result<Vec<u8>, NcError> {
+    check_id(id)?;
+    for f in flags {
+        no_line_break("flag", f)?;
+    }
+    let mut payload = gint3(id);
+    let lines: Vec<&str> = flags.iter().map(String::as_str).collect();
+    payload.extend(latin1_bytes(&rc_tokenize(&lines)));
+    Ok(message(NC_NPC_FLAGS_SET, &payload))
+}
+
+/// A database NPC for 111.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewNpc {
+    pub name: String,
+    pub id: u32,
+    pub kind: String,
+    pub scripter: String,
+    pub level: String,
+    pub x: String,
+    pub y: String,
+}
+
+/// Id 111: `name,id,type,scripter,level,x,y` tokenized (the 2004 RC:
+/// `labnpc,1001,OBJECT,labrc,npcdemo_start.nw,20,25`). The fork answers
+/// with 158 for the new NPC.
+pub fn npc_add_message(n: &NewNpc) -> Result<Vec<u8>, NcError> {
+    check_id(n.id)?;
+    let id = n.id.to_string();
+    let items = [&n.name, &id, &n.kind, &n.scripter, &n.level, &n.x, &n.y];
+    for (what, v) in ["NPC name", "id", "type", "scripter", "level", "x", "y"]
+        .iter()
+        .zip(items)
+    {
+        no_line_break(what, v)?;
+    }
+    let joined: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
+    Ok(message(NC_NPC_ADD, &latin1_bytes(&rc_tokenize(&joined))))
+}
+
 /// Id 106: GINT3 id.
 pub fn npc_script_get_message(id: u32) -> Result<Vec<u8>, NcError> {
     check_id(id)?;
     Ok(message(NC_NPC_SCRIPT_GET, &gint3(id)))
 }
 
-/// Id 109: GINT3 id, then the script.
+/// Id 109: GINT3 id, then the script tokenized (see [`tokenized_script`]).
 pub fn npc_script_set_message(id: u32, script: &str) -> Result<Vec<u8>, NcError> {
     check_id(id)?;
     let mut payload = gint3(id);
-    payload.extend(script_bytes(script)?);
+    payload.extend(tokenized_script(script));
     Ok(message(NC_NPC_SCRIPT_SET, &payload))
 }
 
-/// Id 112: the class name as the rest of the line.
-///
-/// The notes write `str` where they saw a length byte. They do not write it
-/// for this packet. A lab check should confirm it is not a GSTRING.
+/// Id 112: the class name as the rest of the line (confirmed with the 2004
+/// RC, lab 2026-11-13).
 pub fn class_get_message(name: &str) -> Result<Vec<u8>, NcError> {
     no_line_break("class name", name)?;
     Ok(message(NC_CLASS_GET, &latin1_bytes(name)))
 }
 
-/// Id 113: GSTRING name, then the script.
+/// Id 113: GSTRING name, then the script tokenized (see
+/// [`tokenized_script`]; the 2004 RC doubled the quotes inside a line).
 pub fn class_set_message(name: &str, script: &str) -> Result<Vec<u8>, NcError> {
     let mut payload = Vec::new();
     push_gstring(&mut payload, &gstring_bytes("class name", name)?);
-    payload.extend(script_bytes(script)?);
+    payload.extend(tokenized_script(script));
     Ok(message(NC_CLASS_SET, &payload))
 }
 
@@ -236,21 +356,20 @@ pub fn weapon_list_message() -> Vec<u8> {
     message(NC_WEAPON_LIST_GET, b"")
 }
 
-/// Id 116: the weapon name as the rest of the line.
-///
-/// Same reading as [`class_get_message`]: the notes do not write `str` here,
-/// and a lab check should confirm there is no length byte.
+/// Id 116: the weapon name as the rest of the line (confirmed, lab
+/// 2026-11-13). An `NCL11012` client gets 33, an `NCL21075` one 192.
 pub fn weapon_get_message(name: &str) -> Result<Vec<u8>, NcError> {
     no_line_break("weapon name", name)?;
     Ok(message(NC_WEAPON_GET, &latin1_bytes(name)))
 }
 
-/// Id 117: GSTRING name, GSTRING image, then the script.
+/// Id 117: GSTRING name, GSTRING image, then the script with its lines
+/// joined by 0xA7 (see [`weapon_script_bytes`]).
 pub fn weapon_set_message(name: &str, image: &str, script: &str) -> Result<Vec<u8>, NcError> {
     let mut payload = Vec::new();
     push_gstring(&mut payload, &gstring_bytes("weapon name", name)?);
     push_gstring(&mut payload, &gstring_bytes("weapon image", image)?);
-    payload.extend(script_bytes(script)?);
+    payload.extend(weapon_script_bytes(script));
     Ok(message(NC_WEAPON_SET, &payload))
 }
 
@@ -313,17 +432,29 @@ pub fn parse_id_only(payload: &[u8]) -> Option<u32> {
     read_gint3(payload).map(|n| n as u32)
 }
 
-/// Id 160: GINT3 id, then the script.
-pub fn parse_npc_script(payload: &[u8]) -> Option<(u32, String)> {
-    let id = read_gint3(payload)? as u32;
-    Some((id, text(&payload[3..])))
+/// Tokenized text (157, 160, 161, 162) back into lines joined by line
+/// feeds, as the real RCs show it.
+fn detokenized(bytes: &[u8]) -> String {
+    gdetokenize(&text(bytes)).join("\n")
 }
 
-/// Id 162: GSTRING name, then the script.
+/// Id 160: GINT3 id, then the script tokenized, one item per line.
+pub fn parse_npc_script(payload: &[u8]) -> Option<(u32, String)> {
+    let id = read_gint3(payload)? as u32;
+    Some((id, detokenized(payload.get(3..)?)))
+}
+
+/// Id 161: GINT3 id, then the flags tokenized, one per item.
+pub fn parse_npc_flags(payload: &[u8]) -> Option<(u32, Vec<String>)> {
+    let id = read_gint3(payload)? as u32;
+    Some((id, gdetokenize(&text(payload.get(3..)?))))
+}
+
+/// Id 162: GSTRING name, then the script tokenized, one item per line.
 pub fn parse_class_script(payload: &[u8]) -> Option<(String, String)> {
     let mut i = 0;
     let name = text(&read_gstring(payload, &mut i)?);
-    Some((name, text(&payload[i..])))
+    Some((name, detokenized(&payload[i..])))
 }
 
 /// Id 167: repeated GSTRING names. A truncated string fails the whole list.
@@ -336,11 +467,14 @@ pub fn parse_weapon_names(payload: &[u8]) -> Option<Vec<String>> {
     Some(names)
 }
 
-/// Id 33, as seihai-gserver-v2 sends it to this NC (lab run 2026-11-12):
-/// GSTRING name, GCHAR 0 (the image part), GSTRING image, GCHAR 1 (the
-/// script part), GSHORT length, then that many script bytes: the
-/// `PLO_NPCWEAPONADD` shape. A length that runs past the message fails. A
-/// GINT3 length, which the notes still need a lab check for, is not tried.
+/// Id 33, as seihai-gserver-v2 sends it to an `NCL11012` client (lab runs
+/// 2026-11-12 and 2026-11-13): GSTRING name, GCHAR 0, GSTRING image, GCHAR
+/// 1, a two-byte length, then the script with its lines joined by 0xA7.
+///
+/// The length is a GSHORT, high 7 bits first, but above 16383 the fork
+/// writes a high byte past 7 bits (21212 went as `c5 7c`), and the 2004 RC
+/// still read it; so the high byte is not masked. A length that does not
+/// end the message fails. The script comes back with line feeds.
 pub fn parse_weapon_script(payload: &[u8]) -> Option<WeaponScript> {
     let mut i = 0;
     let name = text(&read_gstring(payload, &mut i)?);
@@ -353,9 +487,14 @@ pub fn parse_weapon_script(payload: &[u8]) -> Option<WeaponScript> {
         return None;
     }
     i += 1;
-    let len = usize::from(read_gshort(payload.get(i..)?)?);
+    let hi = usize::from(payload.get(i)?.checked_sub(0x20)?);
+    let lo = usize::from(payload.get(i + 1)?.checked_sub(0x20)?);
+    if lo > 0x7F {
+        return None;
+    }
+    let len = (hi << 7) | lo;
     i += 2;
-    let script = text(payload.get(i..i + len)?);
+    let script = weapon_script_text(payload.get(i..i + len)?);
     if i + len != payload.len() {
         return None;
     }
@@ -363,6 +502,20 @@ pub fn parse_weapon_script(payload: &[u8]) -> Option<WeaponScript> {
         name,
         image,
         script,
+    })
+}
+
+/// Id 192, what the fork sends an `NCL21075` client (RC3, lab 2026-11-13):
+/// GSTRING name, GSTRING image, then the script joined by 0xA7 as the rest
+/// of the line. The script comes back with line feeds.
+pub fn parse_weapon_script2(payload: &[u8]) -> Option<WeaponScript> {
+    let mut i = 0;
+    let name = text(&read_gstring(payload, &mut i)?);
+    let image = text(&read_gstring(payload, &mut i)?);
+    Some(WeaponScript {
+        name,
+        image,
+        script: weapon_script_text(&payload[i..]),
     })
 }
 
@@ -385,8 +538,12 @@ pub enum NcEvent {
     ClassScript { name: String, script: String },
     /// Id 167.
     Weapons(Vec<String>),
-    /// Id 33.
+    /// Id 33 (or 192).
     Weapon(WeaponScript),
+    /// Id 161.
+    NpcFlags { id: u32, flags: Vec<String> },
+    /// Id 29: an NPC was reset.
+    NpcReset(u32),
     /// Id 188. The class name.
     ClassDeleted(String),
     /// Any other message, or a known id whose payload did not match.
@@ -405,7 +562,28 @@ pub fn parse_event(m: &Message) -> NcEvent {
                 payload: p.clone(),
             },
         },
-        NC_NPC_ATTRIBUTES => NcEvent::Attributes(text(p)),
+        NC_WEAPON_SCRIPT2 => match parse_weapon_script2(p) {
+            Some(weapon) => NcEvent::Weapon(weapon),
+            None => NcEvent::Message {
+                id: m.id,
+                payload: p.clone(),
+            },
+        },
+        NC_NPC_FLAGS => match parse_npc_flags(p) {
+            Some((id, flags)) => NcEvent::NpcFlags { id, flags },
+            None => NcEvent::Message {
+                id: m.id,
+                payload: p.clone(),
+            },
+        },
+        NC_NPC_RESET_NOTIFY => match parse_id_only(p) {
+            Some(id) => NcEvent::NpcReset(id),
+            None => NcEvent::Message {
+                id: m.id,
+                payload: p.clone(),
+            },
+        },
+        NC_NPC_ATTRIBUTES => NcEvent::Attributes(detokenized(p)),
         NC_NPC_ROW => match parse_npc_add(p) {
             Some(row) => NcEvent::Npc(row),
             None => NcEvent::Message {
@@ -736,13 +914,102 @@ mod tests {
     }
 
     #[test]
-    fn script_line_break_is_not_sent() {
-        assert!(matches!(
-            npc_script_set_message(1, "a\nb"),
-            Err(NcError::NeedsLabCheck { .. })
-        ));
-        assert!(class_set_message("A", "a\nb").is_err());
-        assert!(weapon_set_message("w", "img", "a\nb").is_err());
+    fn scripts_with_line_breaks_match_the_2004_rc() {
+        // 109 for NPC 1001 (`20 27 89`), lab 2026-11-13.
+        let set = npc_script_set_message(
+            1001,
+            "// lab npc script\r\nif (created) {\r\n  this.lab = 1;\r\n}\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            set,
+            b"\x8d \x27\x89\"// lab npc script\",\"if (created) {\",\"  this.lab = 1;\",}"
+        );
+        // 113: GSTRING name, then the lines tokenized, quotes doubled.
+        let class = class_set_message(
+            "labclass",
+            "// lab class\nfunction onCreated() {\n  echo(\"lab, class\");\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            class,
+            b"\x91(labclass\"// lab class\",\"function onCreated() {\",\"  echo(\"\"lab, class\"\");\",}"
+        );
+        // 117: lines joined by 0xA7, a final line break included.
+        let weapon = weapon_set_message("w", "img", "a\nb\n").unwrap();
+        assert_eq!(weapon, b"\x95!w#imga\xa7b\xa7");
+    }
+
+    #[test]
+    fn npc_add_warp_and_flags_match_the_2004_rc() {
+        let add = npc_add_message(&NewNpc {
+            name: "labnpc".into(),
+            id: 1001,
+            kind: "OBJECT".into(),
+            scripter: "labrc".into(),
+            level: "npcdemo_start.nw".into(),
+            x: "20".into(),
+            y: "25".into(),
+        })
+        .unwrap();
+        assert_eq!(add, b"\x8flabnpc,1001,OBJECT,labrc,npcdemo_start.nw,20,25");
+        assert_eq!(
+            npc_warp_message(1001, 12.5, 14.0, "npcdemo_start.nw").unwrap(),
+            b"\x8b \x27\x899<npcdemo_start.nw"
+        );
+        assert!(npc_warp_message(1001, 12.25, 14.0, "x").is_err());
+        assert_eq!(
+            npc_flags_set_message(1001, &["labnpcflag=1".into(), "other.flag=a b".into()]).unwrap(),
+            b"\x8e \x27\x89labnpcflag=1,\"other.flag=a b\""
+        );
+        assert_eq!(npc_reset_message(1001).unwrap(), b"\x89 \x27\x89");
+        assert_eq!(npc_flags_get_message(1001).unwrap(), b"\x8c \x27\x89");
+        assert_eq!(
+            parse_npc_flags(b" \x27\x89labnpcflag=1,\"other.flag=a b\"").unwrap(),
+            (
+                1001,
+                vec!["labnpcflag=1".to_string(), "other.flag=a b".into()]
+            )
+        );
+        assert_eq!(
+            parse_event(&Message {
+                id: 29,
+                payload: b" \x27\x89".to_vec()
+            }),
+            NcEvent::NpcReset(1001)
+        );
+    }
+
+    #[test]
+    fn weapon_script_length_past_seven_bits() {
+        // lab20000: 21212 bytes, sent as `c5 7c` (lab 2026-11-13).
+        let body = "x".repeat(21211) + "\u{a7}";
+        let mut payload = Vec::new();
+        push_gstring(&mut payload, b"lab20000");
+        payload.push(32);
+        push_gstring(&mut payload, b"wbomb1.png");
+        payload.push(33);
+        payload.extend_from_slice(&[0xc5, 0x7c]);
+        payload.extend(latin1_bytes(&body));
+        let w = parse_weapon_script(&payload).unwrap();
+        assert_eq!(w.script.len(), 21212);
+        assert!(w.script.ends_with('\n'));
+        // 192 to an NCL21075 client: no markers, no length.
+        let mut p2 = Vec::new();
+        push_gstring(&mut p2, b"lab20000");
+        push_gstring(&mut p2, b"wbomb1.png");
+        p2.extend_from_slice(b"// a\xa7// b\xa7");
+        let w2 = parse_event(&Message {
+            id: 192,
+            payload: p2,
+        });
+        match w2 {
+            NcEvent::Weapon(w) => {
+                assert_eq!(w.image, "wbomb1.png");
+                assert_eq!(w.script, "// a\n// b\n");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -753,6 +1020,7 @@ mod tests {
         let set = class_set_message("Guard", "return;").unwrap();
         assert_eq!(set[0], gchar(NC_CLASS_SET));
         assert_eq!(&set[1..], b"%Guardreturn;");
+        assert_eq!(class_set_message("Guard", "").unwrap(), b"\x91%Guard");
         let weapon_get = weapon_get_message("sword").unwrap();
         assert_eq!(&weapon_get[1..], b"sword");
         let delete = weapon_delete_message("sword").unwrap();
