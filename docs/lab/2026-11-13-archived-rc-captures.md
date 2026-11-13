@@ -58,7 +58,9 @@ at 05:44. Times inside one step are consistent.
 | rc201 ("2002/01/04") | `GSERV022` | – | Direct to the gserver port; logged in; every window opened once. |
 | rc8212001 ("2001/08/20") | `GSERV022` | – | As rc201. |
 | rc62101 ("2001/01/27") | `GSERV021` | – | Logged in; every window opened once; account list and get. |
-| rc1025, rc139rev2, rc133 | `GSERV020`, `019`, `014` | – | **Not run**: the owner stopped the lab here. |
+| rc1025 ("2000/10/25") | `GSERV020` | – | Second pass (below): logged in with one start-dialog server option; every window opened once; account list. |
+| rc139rev2 ("2000/8/19") | `GSERV019` | – | Second pass: logged in with all four start-dialog server options; every window opened once; account list. |
+| rc133 ("GServer2 Remote Control (C) Stefan Knorr") | `GSERV014` | – | Second pass: logged in; its account add was sent and misread by the fork (below). |
 
 ## Logins
 
@@ -245,17 +247,87 @@ Reply ids above 114 seen from the fork: 157, 158, 159, 160, 161, 162, 163,
 167, 188, 192. Ids below it that the fork sends to the NC socket: 25, 29, 33
 and 74.
 
+## Second pass (07:09 to 07:19 UTC)
+
+This pass used seihai-gserver-v2 at `e3da7ace` (the `PACKET_LOGGING` build that
+finished during the first pass) and the same relay with the type mapping fixed.
+Its log is the `run4` section of the hex file.
+
+### The 2000 to 2002 builds (direct to the gserver port)
+
+All three logged in with type 1 and plain zlib, the same as rc62101. The fork
+logged `[RC] [GSERV020 (unknown)]` and `[RC] [GSERV019 (unknown)]`: it has no
+name for those two tokens but accepts them. It logged `[RC] [GSERV014 (1.30)]`
+for rc133. rc133 sends no nickname (no 2) after its login.
+
+The start dialog of rc1025 and rc139rev2 (and rc62101) has four server options
+with "don't change" boxes. With a box cleared, the RC sends one message right
+after the login frame. Each is a 4-byte 7-bit integer:
+
+| Id | Option | Seen |
+|---:|---|---|
+| 55 | respawn time (bushes etc.), seconds | `57 20 20 20 35` = 21; rc1025 `57 20 20 20 39` = 25 |
+| 56 | horse lifetime, seconds | `58 20 20 20 36` = 22 |
+| 57 | alignment increment time, seconds | `59 20 20 22 4d` = 301 |
+| 58 | baddy respawn time, seconds | `5a 20 20 20 3f` = 31 |
+
+The fork sent nothing back to any of them and logged nothing. Today 55 to 58
+mean other things on an RC link (55 is `ADDPLAYER` from the server). rc1025 and
+rc139rev2 also used 72/70 for the account list. rc139rev2's Get List button is
+hidden by Wine's form scaling; Alt+G sent it.
+
+**rc133 account add (GSERV014):** rc133's account window is a tree of categories
+(Guest, Regular, Graalian Police, Trusted Admins, Administrators); opening it and
+clicking the categories sent nothing. Add, with name `lab133`, a password and
+"No rights", sent **53** (96 bytes): GSTRING account, GSTRING password, then the
+dialog's player properties starting with the byte `69`. They include hearts,
+rupees, items, colours and the level `onlinestartlocal.graal`; the field
+layout of this block is not worked out. Full hex is in the `run4` section. **Fork bug:**
+the fork reads 53 as today's "folder config get". It answered with 77 (the
+folder config) and created no account. It handles a GSERV014 RC with the
+current id meanings.
+
+### The 2004 RC account menu
+
+| Dir | Id | Layout | Seen |
+|---|---:|---|---|
+| C>S | 85 comments get | the account as the rest of the line | `75 labprops` |
+| S>C | 63 | GSTRING account, then the comments tokenized (empty here) | `5f 28 labprops` |
+| C>S | 86 comments set | GSTRING account, then the comments tokenized | `76 28 labprops "first comment line","second, with comma"` |
+| S>C | 74 | reply to 86: `labrc has set the comments of labprops` | |
+| C>S | 87 ban get | the account as the rest of the line | `77 labprops` |
+| S>C | 64 | GSTRING account, GCHAR banned, then the reason tokenized | `60 28 labprops 20` (none); after the set `60 28 labprops 21 "local ban reason","line two"` |
+| C>S | 88 ban set | GSTRING account, GCHAR banned, then the reason tokenized | `78 28 labprops 21 "local ban reason","line two"`; off: the same with `20` |
+| S>C | 74 | reply to 88: `labrc has set the ban of labprops` | |
+| C>S | 75 reset | the account as the rest of the line, after a confirm dialog | `6b labprops` |
+| S>C | 74 | reply to 75: `labrc has reset the attributes of account: labprops` | |
+
+The comments and the ban reason were stored tokenized, as sent. Turning the ban
+off keeps the reason. Reset rewrote the account from `(defaultaccount)`: the
+status, the AP counter, the comments and the ban reason were reset, and
+`COMMUNITYNAME (defaultaccount)` was written into the account. **Fork bug:**
+the community name should stay the account's own name.
+
+### 167 and 158 with two NCs
+
+Two 2004 RCs were on `npcdemo`, each with its NPC-Control socket open. The
+second one added a weapon and an NPC.
+
+- 117 for a new weapon: the fork sent **167 (the full list) only to the NC that sent the 117**. The other NC got only the 74 chat line, so its weapon list goes stale until it asks again with 115. No incremental 167 was seen; every 167 is the whole list.
+- 111 for a new NPC: the fork sent **158 to every NC**. The new NPC had a level that does not exist (`worldu-15.nw`, the dialog's default), and 158 carried 52 with an empty level: `be 20 27 8a 52 27 labnpc2 53 26 OBJECT 54 20`. The 111 quoted the scripter because it has a space: `labnpc2,1002,OBJECT,"Stefan Knorr",worldu-15.nw,30.5,30`.
+
+No UI path made the fork send 158 with a property other than 50, 51 and 52,
+or 159 with extra bytes.
+
 ## What was not captured
 
 - RC2_2.05 itself (GTK crash under Wine; RC3 has the same tokens and stood in for it).
-- rc1025, rc139rev2, rc133: not run.
 - rc141's NPC Control socket (it has NCL11012 like the 2004 RC, so it is expected to match).
-- 158 with a property other than 50/51/52; 159 with extra bytes.
-- A 167 that is an addition rather than the whole list (every 167 seen was the whole list).
+- 158 with a property other than 50/51/52; 159 with extra bytes; an incremental 167 (none is sent, see above).
 - The 2004 RC's own 98 rename (the RC crashed under Wine) and 155/156 (it has no upload menu); both were captured from RC3.
-- Edit Comments, Edit Ban (87/88) and Reset from the 2004 RC account menu, and the player list and toalls sends: those windows were opened only.
+- rc133's account delete and edit (no account showed in its tree), and the player list and toalls sends of every build: those windows were opened only.
 
-## Fork bugs seen (seihai-gserver-v2 `a3b6ac23`)
+## Fork bugs seen (seihai-gserver-v2 `a3b6ac23`; 7 to 9 at `e3da7ace`)
 
 1. 76/77 (and 157/160/161/162) leave items with spaces unquoted. A real RC's set then splits every line at its spaces: `serveroptions.txt` 572 → 2476 lines, `foldersconfig.txt` one word per line.
 2. RC uploads (93, single or large) store the raw block's trailing line feed: +1 byte per piece.
@@ -263,3 +335,6 @@ and 74.
 4. A type-6 RC can get one plain-zlib frame (id 42), with no compression byte, ahead of the gen-5 stream.
 5. 104 answers 159 twice for the same id.
 6. `BANREASON` is stored with the tokenizer's quotes.
+7. rc133's (GSERV014) account add 53 is read as today's folder-config get: the fork answers with 77 and adds no account.
+8. 75 reset writes `COMMUNITYNAME (defaultaccount)` into the reset account.
+9. A new weapon's 167 goes only to the NC that added it; other NCs keep a stale list.
