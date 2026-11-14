@@ -232,6 +232,12 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       add`, `reset`, `warp` and `flags [--set-file]` (111, 105/29, 107,
       108/161, 110). Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`, unit tests and
       `tests/nc_commands.rs`.
+- [x] NPC, class and weapon script sets read that same target back (106,
+      112, 116) and succeed only when the reply matches the text this
+      client can represent. RC chat, a class name, a weapon list and
+      another target's script do not count. A match is that read, not a
+      restart. Evidence: `tests/nc_commands.rs` and `tests/window_tabs.rs`
+      against loopback fakes. No real client.
 
 ## Window
 

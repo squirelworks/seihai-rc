@@ -372,6 +372,21 @@ client waits `--settle` ms and reads what arrived.
 | Weapon set | 117: GSTRING name, GSTRING image, then the script joined by `0xA7`, not tokenized, no length | an RC chat line; a new weapon also gets 167 |
 | Weapon delete | 118: the weapon name as the rest of the line | an RC chat line and 167 |
 
+A script set is not kept just because the server accepted the bytes or
+answered with RC chat (id 74), a class name (163) or a weapon list (167).
+`nc npc set`, `nc class set` and `nc weapon set`, and the same buttons in
+the window, send the get for that same NPC, class or weapon (106, 112 or
+116) immediately after the set. The command succeeds only when id 160, 162,
+33 or 192 for that target carries the text this client can represent for
+what it sent. For an NPC or class, carriage returns fold into line feeds and
+one final line feed is omitted. For a weapon, line breaks are `0xA7`, a
+trailing line break stays, and a section sign in the text is a line break.
+A match is the script observed on that read. It does not show that the
+script is still there after a restart. A different script, an `error:` chat
+line, a disconnect (id 16) and no same-target reply are different failures.
+Another target's script is not the reply. A chat line such as `NPC script
+of <name> updated by <rc>` is not the script.
+
 Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
 192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s
 on the NC socket as a keepalive; the fork does not answer it.

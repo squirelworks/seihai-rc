@@ -14,7 +14,7 @@ use seihai_rc::nc::{
     npc_delete_message, npc_get_message, npc_script_get_message, npc_script_set_message,
     weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcSession,
     NC_CLASS_DELETE, NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET, NC_CLASS_NAME, NC_CLASS_SCRIPT,
-    NC_CLASS_SET, NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT, NC_WEAPON_NAMES,
+    NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT, NC_WEAPON_NAMES,
     NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
 };
 use seihai_rc::rc::{discover_npc_servers, LoginParams, RcKind};
@@ -139,6 +139,15 @@ enum NcPlan {
         payload: Vec<u8>,
         reply: Vec<Vec<u8>>,
     },
+    /// Read one frame and require these messages, in order, then answer.
+    Expect {
+        messages: Vec<(u8, Vec<u8>)>,
+        reply: Vec<Vec<u8>>,
+    },
+}
+
+fn parts(msg: &[u8]) -> (u8, Vec<u8>) {
+    (msg[0].wrapping_sub(0x20), msg[1..].to_vec())
 }
 
 fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
@@ -164,6 +173,19 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
                 assert_eq!(msgs.len(), 1, "{msgs:?}");
                 assert_eq!(msgs[0].id, id, "{msgs:?}");
                 assert_eq!(msgs[0].payload, payload);
+                seen = msgs;
+                if !reply.is_empty() {
+                    send_msgs(&mut stream, &mut codec, &reply);
+                }
+            }
+            NcPlan::Expect { messages, reply } => {
+                let frame = read_raw_frame(&mut stream).expect("request frame");
+                let msgs = split_messages(&codec.decode(&frame).unwrap());
+                assert_eq!(msgs.len(), messages.len(), "{msgs:?}");
+                for (msg, (id, payload)) in msgs.iter().zip(&messages) {
+                    assert_eq!(msg.id, *id, "{msgs:?}");
+                    assert_eq!(&msg.payload, payload);
+                }
                 seen = msgs;
                 if !reply.is_empty() {
                     send_msgs(&mut stream, &mut codec, &reply);
@@ -417,10 +439,13 @@ fn npc_get_set_delete_and_script_round_trip() {
     );
 
     let set = npc_script_set_message(12, "return;").unwrap();
-    let (addr, handle) = fake_nc(NcPlan::Reply {
-        id: 109,
-        payload: set[1..].to_vec(),
-        reply: vec![],
+    let get = npc_script_get_message(12).unwrap();
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: vec![parts(&set), parts(&get)],
+        reply: vec![
+            message(74, b"NPC script of labnpc updated by labrc"),
+            message(NC_NPC_SCRIPT, &set[1..]),
+        ],
     });
     let output = cli(&[
         "nc",
@@ -439,7 +464,7 @@ fn npc_get_set_delete_and_script_round_trip() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "sent NPC script for 12\n");
+    assert_eq!(stdout(&output), "observed NPC script for 12\n");
     handle.join().unwrap();
 
     let (addr, handle) = fake_nc(NcPlan::Reply {
@@ -514,10 +539,15 @@ fn class_list_get_set_and_delete() {
     assert_eq!(stdout(&output), "return;\n");
     handle.join().unwrap();
 
-    let (addr, handle) = fake_nc(NcPlan::Reply {
-        id: NC_CLASS_SET,
-        payload: b"%Guardreturn;".to_vec(),
-        reply: vec![],
+    let set = seihai_rc::nc::class_set_message("Guard", "return;").unwrap();
+    let get = seihai_rc::nc::class_get_message("Guard").unwrap();
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: vec![parts(&set), parts(&get)],
+        reply: vec![
+            message(NC_CLASS_NAME, b"Guard"),
+            message(74, b"labnc updated class Guard"),
+            message(NC_CLASS_SCRIPT, &set[1..]),
+        ],
     });
     let output = cli(&[
         "nc",
@@ -536,7 +566,7 @@ fn class_list_get_set_and_delete() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "sent class Guard\n");
+    assert_eq!(stdout(&output), "observed class Guard\n");
     handle.join().unwrap();
 
     // 119 and 188 carry the bare class name (seihai-gserver-v2, lab run 2026-11-12).
@@ -654,10 +684,14 @@ fn weapon_list_get_set_and_delete() {
     handle.join().unwrap();
 
     let set = weapon_set_message("sword", "sword.png", "return;").unwrap();
-    let (addr, handle) = fake_nc(NcPlan::Reply {
-        id: set[0].wrapping_sub(0x20),
-        payload: set[1..].to_vec(),
-        reply: vec![],
+    let get = weapon_get_message("sword").unwrap();
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: vec![parts(&set), parts(&get)],
+        reply: vec![
+            message(74, b"Weapon sword updated by labrc"),
+            message(NC_WEAPON_NAMES, b"%sword"),
+            weapon_script_reply("sword", "sword.png", b"return;"),
+        ],
     });
     let output = cli(&[
         "nc",
@@ -678,7 +712,7 @@ fn weapon_list_get_set_and_delete() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "sent weapon sword\n");
+    assert_eq!(stdout(&output), "observed weapon sword\n");
     handle.join().unwrap();
 
     let delete = weapon_delete_message("sword").unwrap();
@@ -715,12 +749,15 @@ fn a_script_with_line_breaks_goes_tokenized() {
         "// lab npc script\nif (created) {\n  this.lab = 1;\n}\n",
     )
     .unwrap();
-    let mut payload = gint3_only(12);
-    payload.extend_from_slice(b"\"// lab npc script\",\"if (created) {\",\"  this.lab = 1;\",}");
-    let (addr, handle) = fake_nc(NcPlan::Reply {
-        id: 109,
-        payload,
-        reply: vec![],
+    let set = npc_script_set_message(
+        12,
+        "// lab npc script\nif (created) {\n  this.lab = 1;\n}\n",
+    )
+    .unwrap();
+    let get = npc_script_get_message(12).unwrap();
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: vec![parts(&set), parts(&get)],
+        reply: vec![message(NC_NPC_SCRIPT, &set[1..])],
     });
     let output = cli(&[
         "nc",
@@ -739,8 +776,123 @@ fn a_script_with_line_breaks_goes_tokenized() {
         "5",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "observed NPC script for 12\n");
     handle.join().unwrap();
     let _ = std::fs::remove_file(&path);
+}
+
+fn weapon_script_reply(name: &str, image: &str, script: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, name.as_bytes());
+    payload.push(gchar(0));
+    push_gstring(&mut payload, image.as_bytes());
+    payload.push(gchar(1));
+    push_gshort(&mut payload, script.len() as u16);
+    payload.extend_from_slice(script);
+    message(NC_WEAPON_SCRIPT, &payload)
+}
+
+fn npc_set(addr: &str, script: &str) -> Output {
+    cli(&[
+        "nc",
+        "npc",
+        "set",
+        "12",
+        "--script",
+        script,
+        "--server",
+        addr,
+        "--account",
+        "labnc",
+        "--settle",
+        "200",
+        "--timeout",
+        "5",
+    ])
+}
+
+#[test]
+fn npc_set_readback_distinguishes_the_outcomes() {
+    let set = npc_script_set_message(12, "return;").unwrap();
+    let get = npc_script_get_message(12).unwrap();
+    let messages = vec![parts(&set), parts(&get)];
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![
+            message(74, b"NPC script of labnpc updated by labrc"),
+            message(NC_NPC_SCRIPT, &{
+                let mut old = gint3_only(12);
+                old.extend_from_slice(b"old;");
+                old
+            }),
+        ],
+    });
+    let output = npc_set(&addr, "return;");
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("other script text"), "{err}");
+    assert!(!err.contains("refused"), "{err}");
+    assert!(!stdout(&output).contains("observed"), "{}", stdout(&output));
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![
+            message(74, b"NPC script of labnpc updated by labrc"),
+            message(NC_CLASS_NAME, b"Guard"),
+        ],
+    });
+    let output = npc_set(&addr, "return;");
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("no matching script"), "{err}");
+    assert!(err.contains("id 74"), "{err}");
+    assert!(!err.contains("other script text"), "{err}");
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![message(NC_NPC_SCRIPT, &{
+            let mut other = gint3_only(99);
+            other.extend_from_slice(b"return;");
+            other
+        })],
+    });
+    let output = npc_set(&addr, "return;");
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("no matching script"), "{err}");
+    assert!(
+        err.contains("script 99") || err.contains("[npc] script 99"),
+        "{err}"
+    );
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![message(74, b"error: NPC script was not saved")],
+    });
+    let output = npc_set(&addr, "return;");
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("refused"), "{err}");
+    assert!(err.contains("error: NPC script was not saved"), "{err}");
+    assert!(!err.contains("disconnected"), "{err}");
+    assert!(!err.contains("no matching script"), "{err}");
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages,
+        reply: vec![message(16, b"dropped")],
+    });
+    let output = npc_set(&addr, "return;");
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("disconnected"), "{err}");
+    assert!(err.contains("dropped"), "{err}");
+    assert!(!err.contains("refused"), "{err}");
+    handle.join().unwrap();
 }
 
 #[test]
