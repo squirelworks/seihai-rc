@@ -35,6 +35,10 @@ const GCHAR_MAX: u8 = 0xDF;
 
 /// Server to client: the session was refused or ended. Payload is text.
 pub const NC_DISCMESSAGE: u8 = 16;
+/// RC chat on this socket, the same id as the game server's RC chat.
+/// A line whose text starts with `error:` is a refusal. Any other chat
+/// line, including `NPC script of <name> updated by <rc>`, is not a script.
+pub const NC_RC_CHAT: u8 = 74;
 /// Server to client: one weapon script, to an `NCL11012` client.
 pub const NC_WEAPON_SCRIPT: u8 = 33;
 /// Server to client: an NPC was reset (105). GINT3 id.
@@ -201,6 +205,28 @@ fn weapon_script_bytes(script: &str) -> Vec<u8> {
 /// A 0xA7-joined weapon script back into lines joined by line feeds.
 fn weapon_script_text(bytes: &[u8]) -> String {
     text(bytes).replace('\u{a7}', "\n")
+}
+
+/// The NPC or class script a later get can show for `script`.
+///
+/// Carriage returns before line feeds are dropped, and one final line feed
+/// is not stored: that is how ids 109 and 113 are built. The result is what
+/// reading those bytes back produces, so the comparison follows this
+/// client's tokenizer. A character outside Latin-1 becomes `?`. This is the
+/// text to compare with id 160 or 162. A match is that read, not a later
+/// restart.
+pub fn representable_npc_class_script(script: &str) -> String {
+    detokenized(&tokenized_script(script))
+}
+
+/// The weapon script a later get can show for `script`.
+///
+/// Line breaks become `0xA7` on the wire and come back as line feeds, so a
+/// trailing line break stays and a section sign in the text is a line break.
+/// A character outside Latin-1 becomes `?`. This is the text to compare with
+/// id 33 or 192.
+pub fn representable_weapon_script(script: &str) -> String {
+    weapon_script_text(&weapon_script_bytes(script))
 }
 
 fn gstring_bytes(what: &'static str, value: &str) -> Result<Vec<u8>, NcError> {
@@ -631,6 +657,124 @@ pub fn parse_event(m: &Message) -> NcEvent {
             id: m.id,
             payload: p.clone(),
         },
+    }
+}
+
+/// Whose script a set asked to read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptSubject {
+    Npc(u32),
+    Class(String),
+    Weapon(String),
+}
+
+/// What a same-target script read showed after a set.
+///
+/// A matching script is the text observed on that read. It does not show
+/// that the script is still there after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptObservation {
+    /// Id 160, 162, 33 or 192 for this target, equal to the representable text.
+    Observed,
+    /// That reply arrived and its script text differs.
+    Different { got: String },
+    /// Id 74 whose text starts with `error:`, before a same-target script.
+    Refused(String),
+    /// Id 16, before a same-target script.
+    Disconnected(String),
+    /// Nothing above arrived. Chat, a class name, a weapon list and another
+    /// target's script do not fill this in.
+    NoMatchingReply,
+}
+
+/// A short name for logs and errors: `NPC script for 12`, `class Guard`,
+/// `weapon sword`.
+pub fn script_subject_phrase(subject: &ScriptSubject) -> String {
+    match subject {
+        ScriptSubject::Npc(id) => format!("NPC script for {id}"),
+        ScriptSubject::Class(name) => format!("class {name}"),
+        ScriptSubject::Weapon(name) => format!("weapon {name}"),
+    }
+}
+
+/// The script text in `event` when it is the reply for `subject`.
+pub fn matching_script<'a>(subject: &ScriptSubject, event: &'a NcEvent) -> Option<&'a str> {
+    match (subject, event) {
+        (ScriptSubject::Npc(id), NcEvent::NpcScript { id: got, script }) if id == got => {
+            Some(script.as_str())
+        }
+        (ScriptSubject::Class(name), NcEvent::ClassScript { name: got, script }) if name == got => {
+            Some(script.as_str())
+        }
+        (ScriptSubject::Weapon(name), NcEvent::Weapon(weapon)) if name == &weapon.name => {
+            Some(weapon.script.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Id 74 text that starts with `error:` (the class-delete refusal does).
+pub fn rc_chat_refusal(event: &NcEvent) -> Option<String> {
+    match event {
+        NcEvent::Message { id, payload } if *id == NC_RC_CHAT => {
+            let line = text(payload);
+            line.trim_start().starts_with("error:").then_some(line)
+        }
+        _ => None,
+    }
+}
+
+/// The first conclusive event for `subject`.
+///
+/// A same-target script, a disconnect and an `error:` chat line each end
+/// the check. An update chat line, a class name, a weapon list and another
+/// target's script do not.
+pub fn observe_script(
+    subject: &ScriptSubject,
+    expected: &str,
+    events: &[NcEvent],
+) -> ScriptObservation {
+    for event in events {
+        if let Some(got) = matching_script(subject, event) {
+            return if got == expected {
+                ScriptObservation::Observed
+            } else {
+                ScriptObservation::Different {
+                    got: got.to_string(),
+                }
+            };
+        }
+        if let NcEvent::Disconnect(why) = event {
+            return ScriptObservation::Disconnected(why.clone());
+        }
+        if let Some(why) = rc_chat_refusal(event) {
+            return ScriptObservation::Refused(why);
+        }
+    }
+    ScriptObservation::NoMatchingReply
+}
+
+impl ScriptObservation {
+    /// `Ok` is the observed line. `Err` is the failure, and the four
+    /// failures name different causes.
+    pub fn outcome_line(
+        &self,
+        subject: &ScriptSubject,
+        expected_len: usize,
+    ) -> Result<String, String> {
+        let phrase = script_subject_phrase(subject);
+        match self {
+            Self::Observed => Ok(format!("observed {phrase}")),
+            Self::Different { got } => Err(format!(
+                "{phrase} read back other script text ({} bytes) than was sent ({expected_len} bytes)",
+                got.len()
+            )),
+            Self::Refused(why) => Err(format!("NPC-server refused {phrase}: {why}")),
+            Self::Disconnected(why) => Err(format!("NPC-server disconnected: {why}")),
+            Self::NoMatchingReply => Err(format!(
+                "no matching script for {phrase} arrived after the set; a chat line, a list or another target is not the script"
+            )),
+        }
     }
 }
 
@@ -1133,5 +1277,115 @@ mod tests {
         })
         .unwrap();
         assert_eq!((id, script.as_str()), (9, "return;"));
+    }
+
+    #[test]
+    fn representable_script_text_follows_the_wire() {
+        assert_eq!(representable_npc_class_script("a\r\nb\n"), "a\nb");
+        assert_eq!(representable_npc_class_script(""), "");
+        assert_eq!(representable_npc_class_script("ok\u{1f642}"), "ok?");
+        // A trailing line break stays on a weapon, and a section sign is a
+        // line break, because both are 0xA7 on the wire.
+        assert_eq!(representable_weapon_script("a\r\nb\n"), "a\nb\n");
+        assert_eq!(representable_weapon_script("a\u{a7}b"), "a\nb");
+    }
+
+    fn npc_script_event(id: u32, script: &str) -> NcEvent {
+        NcEvent::NpcScript {
+            id,
+            script: script.into(),
+        }
+    }
+
+    #[test]
+    fn script_readback_ignores_chat_and_other_targets() {
+        let subject = ScriptSubject::Npc(12);
+        let expected = "return;";
+        let update = NcEvent::Message {
+            id: NC_RC_CHAT,
+            payload: b"NPC script of labnpc updated by labrc".to_vec(),
+        };
+        let old = npc_script_event(12, "old;");
+        assert_eq!(
+            observe_script(&subject, expected, &[update.clone(), old]),
+            ScriptObservation::Different { got: "old;".into() }
+        );
+        assert_eq!(
+            observe_script(
+                &subject,
+                expected,
+                &[
+                    update.clone(),
+                    NcEvent::Class("Guard".into()),
+                    NcEvent::Weapons(vec!["sword".into()]),
+                    npc_script_event(99, expected),
+                ]
+            ),
+            ScriptObservation::NoMatchingReply
+        );
+        assert_eq!(
+            observe_script(
+                &subject,
+                expected,
+                &[
+                    update,
+                    npc_script_event(99, "old;"),
+                    npc_script_event(12, expected)
+                ]
+            ),
+            ScriptObservation::Observed
+        );
+    }
+
+    #[test]
+    fn script_readback_keeps_refusal_disconnect_and_mismatch_apart() {
+        let subject = ScriptSubject::Class("Guard".into());
+        let expected = "return;";
+        let refusal = NcEvent::Message {
+            id: NC_RC_CHAT,
+            payload: b"error: Guard was not saved".to_vec(),
+        };
+        assert_eq!(
+            observe_script(&subject, expected, std::slice::from_ref(&refusal)),
+            ScriptObservation::Refused("error: Guard was not saved".into())
+        );
+        // The refusal comes first, so a later script is not the outcome.
+        assert_eq!(
+            observe_script(
+                &subject,
+                expected,
+                &[
+                    refusal,
+                    NcEvent::ClassScript {
+                        name: "Guard".into(),
+                        script: expected.into(),
+                    }
+                ]
+            ),
+            ScriptObservation::Refused("error: Guard was not saved".into())
+        );
+        assert_eq!(
+            observe_script(&subject, expected, &[NcEvent::Disconnect("dropped".into())]),
+            ScriptObservation::Disconnected("dropped".into())
+        );
+        let weapon = ScriptSubject::Weapon("sword".into());
+        let got = observe_script(
+            &weapon,
+            "return;",
+            &[NcEvent::Weapon(WeaponScript {
+                name: "sword".into(),
+                image: "sword.png".into(),
+                script: "old;".into(),
+            })],
+        );
+        let line = got.outcome_line(&weapon, "return;".len()).unwrap_err();
+        assert!(line.contains("other script text"), "{line}");
+        assert!(!line.contains("refused"), "{line}");
+        assert!(!line.contains("disconnected"), "{line}");
+        let missing = ScriptObservation::NoMatchingReply
+            .outcome_line(&weapon, 0)
+            .unwrap_err();
+        assert!(missing.contains("no matching script"), "{missing}");
+        assert_ne!(missing, line);
     }
 }

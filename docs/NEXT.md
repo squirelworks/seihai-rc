@@ -232,6 +232,24 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       add`, `reset`, `warp` and `flags [--set-file]` (111, 105/29, 107,
       108/161, 110). Evidence: `docs/lab/2026-11-13-archived-rc-captures.md`, unit tests and
       `tests/nc_commands.rs`.
+- [x] NPC, class and weapon script sets read that same target back (106,
+      112, 116) and succeed only when the reply matches the text this
+      client can represent. RC chat, a class name, a weapon list and
+      another target's script do not count. A match is that read, not a
+      restart. The window ends a script read at the login timeout. A save
+      then reports no matching reply while the link is still up, and the
+      next same-target script stays with that old read so it cannot settle
+      a newer open or save. An `error:` chat is that save's verdict and
+      keeps the same retired slot, so the get's later script is not the
+      next save. A trailing empty field stays in the normalized text: an
+      independent reply matches only when that field is still there.
+      Issue #56's escaped-producer contract is still open.
+      Evidence: `tests/nc_commands.rs`
+      (`npc_save_readback_keeps_a_trailing_empty_field`) and
+      `tests/window_tabs.rs`
+      (`nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save`,
+      `nc_refused_save_stays_up_and_its_script_is_not_the_next_save`)
+      against loopback fakes. No real client.
 
 ## Window
 
