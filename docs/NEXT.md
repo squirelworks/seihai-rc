@@ -266,6 +266,11 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Save needs a second click, then reads back and logs whether the
       server kept what was sent. Evidence:
       `tests/window_tabs.rs::server_tab_reads_and_saves_options_and_flags`.
+- [x] NPC Control editor selection (#53): reopening an unchanged script
+      reloads it; only the selected target's reply fills the editor.
+      Existing scripts cannot be edited/saved while their read is pending.
+      Every selection/new target disarms Delete. Evidence: GUI regressions
+      in `src/ui.rs`; no real-fork or macOS runtime run for this fix.
 - [x] Starting another login clears the previous server's account and file
       forms, pending download, NPC-Control connection and editor, server
       read cache, and armed actions. Each new server is read afresh.

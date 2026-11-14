@@ -127,11 +127,55 @@ struct NcTab {
     target: Option<ScriptTarget>,
     text: String,
     image: String,
-    /// The script last loaded into the editor, to spot a new one.
-    loaded: Option<(ScriptTarget, String)>,
+    /// Existing targets cannot be saved until their script has arrived.
+    ready: bool,
     new_class: String,
     new_weapon: String,
     delete_armed: bool,
+}
+
+impl NcTab {
+    fn clear_editor(&mut self) {
+        self.target = None;
+        self.text.clear();
+        self.image.clear();
+        self.view.script = None;
+        self.view.attributes = None;
+        self.ready = false;
+        self.delete_armed = false;
+    }
+
+    fn select(&mut self, target: ScriptTarget, is_new: bool) {
+        self.clear_editor();
+        self.target = Some(target);
+        self.ready = is_new;
+    }
+
+    fn take_script(&mut self) {
+        let Some((target, text)) = self.view.script.take() else {
+            return;
+        };
+        if self.ready {
+            return;
+        }
+        let matches = match (&self.target, &target) {
+            (Some(ScriptTarget::Npc(a)), ScriptTarget::Npc(b)) => a == b,
+            (Some(ScriptTarget::Class(a)), ScriptTarget::Class(b)) => a == b,
+            (Some(ScriptTarget::Weapon { name: a, .. }), ScriptTarget::Weapon { name: b, .. }) => {
+                a == b
+            }
+            _ => false,
+        };
+        if !matches {
+            return;
+        }
+        if let ScriptTarget::Weapon { image, .. } = &target {
+            self.image = image.clone();
+        }
+        self.target = Some(target);
+        self.text = text;
+        self.ready = true;
+    }
 }
 
 struct App {
@@ -390,6 +434,9 @@ impl eframe::App for App {
             for u in live.drain() {
                 let before = self.nc.view.log.len();
                 self.nc.view.apply(u);
+                // Consume each reply before the next drained update can
+                // replace it with a different target's late response.
+                self.nc.take_script();
                 // One log for every tab.
                 let new: Vec<String> = self.nc.view.log[before..].to_vec();
                 self.view.log.extend(new);
@@ -513,20 +560,7 @@ impl App {
                 self.view.file = None;
             }
         }
-        if self.nc.view.script.is_some() && self.nc.view.script != self.nc.loaded {
-            let (target, text) = self
-                .nc
-                .view
-                .script
-                .clone()
-                .unwrap_or((ScriptTarget::Npc(0), String::new()));
-            if let ScriptTarget::Weapon { image, .. } = &target {
-                self.nc.image = image.clone();
-            }
-            self.nc.target = Some(target.clone());
-            self.nc.text = text.clone();
-            self.nc.loaded = Some((target, text));
-        }
+        self.nc.take_script();
         let kind = self.server.kind;
         if let Some(lines) = self.view.server.get(&kind) {
             if self.server.loaded.get(&kind) != Some(lines) {
@@ -758,6 +792,7 @@ impl App {
                 }
                 None => {
                     if ui.button("Connect").clicked() && !self.nc.addr.trim().is_empty() {
+                        self.nc.clear_editor();
                         self.nc.view = NcView::default();
                         self.nc.live = Some(LiveNc::start(
                             self.nc.addr.trim().to_string(),
@@ -796,9 +831,7 @@ impl App {
                                     );
                                     let sel = self.nc.target == Some(ScriptTarget::Npc(row.id));
                                     if ui.selectable_label(sel, label).clicked() {
-                                        self.nc.target = Some(ScriptTarget::Npc(row.id));
-                                        self.nc.text.clear();
-                                        self.nc.view.attributes = None;
+                                        self.nc.select(ScriptTarget::Npc(row.id), false);
                                         self.nc_send(NcCommand::NpcAttributes(row.id));
                                         self.nc_send(NcCommand::NpcScript(row.id));
                                     }
@@ -810,8 +843,7 @@ impl App {
                                     let sel =
                                         self.nc.target == Some(ScriptTarget::Class(c.clone()));
                                     if ui.selectable_label(sel, c).clicked() {
-                                        self.nc.target = Some(ScriptTarget::Class(c.clone()));
-                                        self.nc.text.clear();
+                                        self.nc.select(ScriptTarget::Class(c.clone()), false);
                                         self.nc_send(NcCommand::ClassGet(c.clone()));
                                     }
                                 }
@@ -820,8 +852,7 @@ impl App {
                                     if ui.button("New class").clicked() {
                                         let n = self.nc.new_class.trim().to_string();
                                         if !n.is_empty() {
-                                            self.nc.target = Some(ScriptTarget::Class(n));
-                                            self.nc.text.clear();
+                                            self.nc.select(ScriptTarget::Class(n), true);
                                         }
                                     }
                                 });
@@ -832,11 +863,13 @@ impl App {
                                     let sel = matches!(&self.nc.target,
                                     Some(ScriptTarget::Weapon { name, .. }) if name == w);
                                     if ui.selectable_label(sel, w).clicked() {
-                                        self.nc.target = Some(ScriptTarget::Weapon {
-                                            name: w.clone(),
-                                            image: String::new(),
-                                        });
-                                        self.nc.text.clear();
+                                        self.nc.select(
+                                            ScriptTarget::Weapon {
+                                                name: w.clone(),
+                                                image: String::new(),
+                                            },
+                                            false,
+                                        );
                                         self.nc_send(NcCommand::WeaponGet(w.clone()));
                                     }
                                 }
@@ -845,12 +878,13 @@ impl App {
                                     if ui.button("New weapon").clicked() {
                                         let n = self.nc.new_weapon.trim().to_string();
                                         if !n.is_empty() {
-                                            self.nc.target = Some(ScriptTarget::Weapon {
-                                                name: n,
-                                                image: String::new(),
-                                            });
-                                            self.nc.image.clear();
-                                            self.nc.text.clear();
+                                            self.nc.select(
+                                                ScriptTarget::Weapon {
+                                                    name: n,
+                                                    image: String::new(),
+                                                },
+                                                true,
+                                            );
                                         }
                                     }
                                 });
@@ -867,7 +901,10 @@ impl App {
         ui.horizontal(|ui| match &target {
             ScriptTarget::Npc(id) => {
                 ui.heading(format!("NPC {id}"));
-                if ui.button("Save script").clicked() {
+                if ui
+                    .add_enabled(self.nc.ready, egui::Button::new("Save script"))
+                    .clicked()
+                {
                     let script = self.nc.text.clone();
                     self.nc_send(NcCommand::NpcScriptSet { id: *id, script });
                 }
@@ -881,7 +918,10 @@ impl App {
             }
             ScriptTarget::Class(name) => {
                 ui.heading(format!("Class {name}"));
-                if ui.button("Save").clicked() {
+                if ui
+                    .add_enabled(self.nc.ready, egui::Button::new("Save"))
+                    .clicked()
+                {
                     let script = self.nc.text.clone();
                     self.nc_send(NcCommand::ClassSet {
                         name: name.clone(),
@@ -896,8 +936,14 @@ impl App {
             ScriptTarget::Weapon { name, .. } => {
                 ui.heading(format!("Weapon {name}"));
                 ui.label("Image");
-                ui.add(egui::TextEdit::singleline(&mut self.nc.image).desired_width(120.0));
-                if ui.button("Save").clicked() {
+                ui.add_enabled(
+                    self.nc.ready,
+                    egui::TextEdit::singleline(&mut self.nc.image).desired_width(120.0),
+                );
+                if ui
+                    .add_enabled(self.nc.ready, egui::Button::new("Save"))
+                    .clicked()
+                {
                     let script = self.nc.text.clone();
                     let image = self.nc.image.clone();
                     self.nc_send(NcCommand::WeaponSet {
@@ -917,11 +963,15 @@ impl App {
                 ui.monospace(attrs);
             });
         }
+        if !self.nc.ready {
+            ui.label("Reading the selected script…");
+        }
         egui::ScrollArea::vertical()
             .id_salt("script")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.add(
+                ui.add_enabled(
+                    self.nc.ready,
                     egui::TextEdit::multiline(&mut self.nc.text)
                         .code_editor()
                         .desired_width(f32::INFINITY)
@@ -983,6 +1033,93 @@ impl App {
                         .desired_rows(24),
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod nc_editor_tests {
+    use super::*;
+
+    #[test]
+    fn reselecting_an_unchanged_script_restores_it_after_the_reply() {
+        for target in [
+            ScriptTarget::Npc(7),
+            ScriptTarget::Class("A".into()),
+            ScriptTarget::Weapon {
+                name: "A".into(),
+                image: "icon.png".into(),
+            },
+        ] {
+            let mut app = App::new(LoginForm::default());
+            app.nc.select(target.clone(), false);
+            assert!(!app.nc.ready, "a pending read must not allow a blank save");
+            app.nc.view.script = Some((target.clone(), "original".into()));
+            app.after_updates();
+            assert!(app.nc.ready);
+            assert_eq!(app.nc.text, "original");
+            app.nc.select(target.clone(), false);
+            app.after_updates();
+            assert!(!app.nc.ready);
+            app.nc.view.script = Some((target, "original".into()));
+            app.after_updates();
+            assert_eq!(app.nc.text, "original");
+            assert!(app.nc.ready);
+        }
+    }
+
+    #[test]
+    fn switching_back_ignores_the_previous_targets_late_reply() {
+        let mut app = App::new(LoginForm::default());
+        let a = ScriptTarget::Class("A".into());
+        let b = ScriptTarget::Class("B".into());
+        app.nc.select(a.clone(), false);
+        app.nc.view.script = Some((a.clone(), "original A".into()));
+        app.after_updates();
+        app.nc.select(b.clone(), false);
+        app.nc.select(a.clone(), false);
+        app.nc.view.script = Some((b, "late B".into()));
+        app.after_updates();
+        assert_eq!(app.nc.target, Some(a.clone()));
+        assert!(!app.nc.ready);
+        app.nc.view.script = Some((a, "original A".into()));
+        app.after_updates();
+        assert_eq!(app.nc.text, "original A");
+        assert!(app.nc.ready);
+        app.nc.text = "unsaved edit".into();
+        app.after_updates();
+        assert_eq!(
+            app.nc.text, "unsaved edit",
+            "an old reply must not refill every repaint"
+        );
+        app.nc.view.script = Some((ScriptTarget::Class("A".into()), "duplicate A".into()));
+        app.after_updates();
+        assert_eq!(
+            app.nc.text, "unsaved edit",
+            "a duplicate reply must not replace edits"
+        );
+    }
+
+    #[test]
+    fn every_selection_and_new_target_disarms_delete() {
+        let mut tab = NcTab::default();
+        for target in [
+            ScriptTarget::Npc(1),
+            ScriptTarget::Npc(2),
+            ScriptTarget::Class("A".into()),
+            ScriptTarget::Weapon {
+                name: "B".into(),
+                image: String::new(),
+            },
+        ] {
+            tab.delete_armed = true;
+            tab.select(target, false);
+            assert!(!tab.delete_armed);
+        }
+        tab.delete_armed = true;
+        tab.select(ScriptTarget::Class("New".into()), true);
+        assert!(!tab.delete_armed);
+        assert!(tab.ready, "a deliberately new script may start empty");
+        assert!(tab.text.is_empty());
     }
 }
 
