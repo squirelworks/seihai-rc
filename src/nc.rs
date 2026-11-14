@@ -941,6 +941,46 @@ mod tests {
     }
 
     #[test]
+    fn rust_server_script_reply_keeps_literal_backslashes() {
+        // Current Rust server wire::tokenize quotes every field and doubles
+        // quotes only. This fixture is its NPC script reply payload.
+        let script = r#"echo("C:\\tmp", 1);"#;
+        let mut payload = Vec::new();
+        push_gint3(&mut payload, 1001);
+        payload.extend_from_slice(br#""echo(""C:\\tmp"", 1);""#);
+        assert_eq!(parse_npc_script(&payload), Some((1001, script.into())));
+        // The same bytes can encode one backslash with an escaping producer.
+        // Without a producer contract the generic decoder must not guess.
+        assert_eq!(
+            rc_tokenize(&[r#"echo("C:\tmp", 1);"#]).as_bytes(),
+            &payload[3..]
+        );
+    }
+
+    #[test]
+    fn script_readback_preserves_escaped_lines_and_save_newline_rule() {
+        let script = "echo(\"hello\", 1);\n\nordinary\n\n";
+        let encoded = latin1_bytes(&rc_tokenize(&script.split('\n').collect::<Vec<_>>()));
+        let mut npc = Vec::new();
+        push_gint3(&mut npc, 1001);
+        npc.extend_from_slice(&encoded);
+        assert_eq!(parse_npc_script(&npc), Some((1001, script.into())));
+        let mut class = Vec::new();
+        push_gstring(&mut class, b"Guard");
+        class.extend_from_slice(&encoded);
+        assert_eq!(
+            parse_class_script(&class),
+            Some(("Guard".into(), script.into()))
+        );
+        // Saving intentionally omits one final LF, not every trailing empty line.
+        let saved = npc_script_set_message(1001, script).unwrap();
+        assert_eq!(
+            parse_npc_script(&saved[1..]),
+            Some((1001, script.strip_suffix('\n').unwrap().into()))
+        );
+    }
+
+    #[test]
     fn npc_add_warp_and_flags_match_the_2004_rc() {
         let add = npc_add_message(&NewNpc {
             name: "labnpc".into(),
