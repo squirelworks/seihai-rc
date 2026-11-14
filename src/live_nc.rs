@@ -154,16 +154,19 @@ impl Drop for LiveNc {
 ///
 /// `deadline` is the login timeout, counted from the send. After it, a
 /// save is [`ScriptObservation::NoMatchingReply`] and the read no longer
-/// blocks another open or save. The slot stays until one same-target
-/// script arrives, and that script stays with this read, so it cannot
-/// settle a newer one. A match is the script observed on that read. It
-/// does not show that the script is still there after a restart.
+/// blocks another open or save. An `error:` chat is the verdict for a
+/// save and retires the slot the same way: the get was already sent, so
+/// the slot stays until one same-target script arrives. That script stays
+/// with this read, so it cannot settle a newer one. A match is the script
+/// observed on that read. It does not show that the script is still there
+/// after a restart.
 struct OpenScriptRead {
     subject: ScriptSubject,
     /// Set when this get follows a save. `None` is an ordinary open.
     expected: Option<String>,
     deadline: Instant,
-    /// The deadline has passed and any save failure was already reported.
+    /// The save was already reported, because the deadline passed or an
+    /// `error:` chat refused it. The slot still takes one same-target script.
     expired: bool,
 }
 
@@ -202,8 +205,8 @@ fn save_expectation(c: &NcCommand) -> Option<(ScriptSubject, String)> {
 
 /// A save or an open while a read for that same target is already out.
 ///
-/// A read whose deadline has passed does not block. Its one later script
-/// is still that old read's.
+/// A read whose deadline has passed, or whose save was refused, does not
+/// block. Its one later script is still that old read's.
 fn blocked_read(reads: &[OpenScriptRead], c: &NcCommand) -> Option<String> {
     let subject = command_subject(c)?;
     reads
@@ -265,10 +268,10 @@ fn verdict(line: Result<String, String>) -> NcUpdate {
 /// Decide any save that this one event settles.
 ///
 /// The oldest unpaired read for that target takes the script. An expired
-/// read takes it as a late reply: no save verdict, and the event is not
-/// shown, so a newer read cannot observe it. An ordinary open that is
-/// still in time is only cleared, and the event is shown. The bool is
-/// whether the window should see `ev`.
+/// read, timed out or refused, takes it as a late reply: no further save
+/// verdict, and the event is not shown, so a newer read cannot observe
+/// it. An ordinary open that is still in time is only cleared, and the
+/// event is shown. The bool is whether the window should see `ev`.
 fn judge(reads: &mut Vec<OpenScriptRead>, ev: &NcEvent) -> (Vec<NcUpdate>, bool) {
     if let Some(index) = reads
         .iter()
@@ -313,25 +316,20 @@ fn judge(reads: &mut Vec<OpenScriptRead>, ev: &NcEvent) -> (Vec<NcUpdate>, bool)
         return (updates, true);
     }
     if let Some(why) = rc_chat_refusal(ev) {
-        let mut saves = Vec::new();
-        let mut still_open = Vec::new();
-        for read in reads.drain(..) {
-            if !read.expired && read.expected.is_some() {
-                saves.push(read);
-            } else {
-                still_open.push(read);
+        // The chat is the verdict. The get was sent separately, so the
+        // slot stays and takes the next same-target script as a late reply.
+        let mut updates = Vec::new();
+        for read in reads.iter_mut() {
+            if read.expired || read.expected.is_none() {
+                continue;
+            }
+            read.expired = true;
+            if let Err(error) =
+                ScriptObservation::Refused(why.clone()).outcome_line(&read.subject, 0)
+            {
+                updates.push(NcUpdate::Error(error));
             }
         }
-        *reads = still_open;
-        let updates = saves
-            .iter()
-            .filter_map(|read| {
-                ScriptObservation::Refused(why.clone())
-                    .outcome_line(&read.subject, 0)
-                    .err()
-                    .map(NcUpdate::Error)
-            })
-            .collect();
         return (updates, true);
     }
     (Vec::new(), true)
@@ -677,6 +675,71 @@ mod tests {
         match &settled[0] {
             NcUpdate::Sent(line) => assert!(line.contains("observed"), "{line}"),
             other => panic!("expected the newer save to observe beta, got {other:?}"),
+        }
+        assert!(reads.is_empty());
+    }
+
+    #[test]
+    fn a_refused_save_keeps_its_script_off_the_next_save() {
+        let mut reads = vec![OpenScriptRead {
+            subject: ScriptSubject::Npc(7),
+            expected: Some("return;".into()),
+            deadline: Instant::now() + Duration::from_secs(5),
+            expired: false,
+        }];
+        let chat = NcEvent::Message {
+            id: crate::nc::NC_RC_CHAT,
+            payload: b"error: NPC script was not saved".to_vec(),
+        };
+        let (refused, show_chat) = judge(&mut reads, &chat);
+        assert!(show_chat);
+        assert_eq!(refused.len(), 1);
+        match &refused[0] {
+            NcUpdate::Error(line) => {
+                assert!(line.contains("refused"), "{line}");
+                assert!(!line.contains("observed"), "{line}");
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+        assert!(reads[0].expired);
+        let (again_refused, _) = judge(&mut reads, &chat);
+        assert!(
+            again_refused.is_empty(),
+            "the retired read must not be refused twice: {again_refused:?}"
+        );
+        assert_eq!(reads.len(), 1);
+        let again = NcCommand::NpcScriptSet {
+            id: 7,
+            script: "return;".into(),
+        };
+        assert!(blocked_read(&reads, &again).is_none());
+        reads.push(OpenScriptRead {
+            subject: ScriptSubject::Npc(7),
+            expected: Some("return;".into()),
+            deadline: Instant::now() + Duration::from_secs(5),
+            expired: false,
+        });
+
+        // A's script text is the same as B's expected text.
+        let (late, show_late) = judge(&mut reads, &npc_script(7, "return;"));
+        assert!(!show_late);
+        match &late[0] {
+            NcUpdate::Sent(line) => {
+                assert!(line.contains("does not settle a newer read"), "{line}");
+                assert!(!line.contains("observed"), "{line}");
+                assert!(!line.contains("refused"), "{line}");
+            }
+            other => panic!("expected the late-script note, got {other:?}"),
+        }
+        assert_eq!(reads.len(), 1);
+        assert!(!reads[0].expired);
+        assert_eq!(reads[0].expected.as_deref(), Some("return;"));
+
+        let (settled, show_new) = judge(&mut reads, &npc_script(7, "return;"));
+        assert!(show_new);
+        match &settled[0] {
+            NcUpdate::Sent(line) => assert!(line.contains("observed"), "{line}"),
+            other => panic!("expected the newer save to observe its own script, got {other:?}"),
         }
         assert!(reads.is_empty());
     }

@@ -390,13 +390,16 @@ of <name> updated by <rc>` is not the script.
 The window's NPC Control worker waits for that read for the same timeout
 it used to log in. When the timeout passes and the link is still up, a
 save is the no-matching-reply failure, and another open or save for that
-target may be sent. A script reply has no request number. Reads for one
-target are paired in the order they were sent, including a read whose
-wait already ended: the next same-target script is that old read's, it is
-not shown as a newer read's script, and it is not that newer read's
-result. The script after that one is. A peer that sends only one script
-for several gets of that target retires the oldest timed-out read and
-leaves the newer read still waiting.
+target may be sent. An `error:` chat is the verdict for a save that is
+still waiting. That chat does not drop the get already sent: the slot
+stays, the same way a timed-out read stays. A script reply has no request
+number. Reads for one target are paired in the order they were sent,
+including a read whose wait already ended or whose save was refused: the
+next same-target script is that old read's, it is not shown as a newer
+read's script, and it is not that newer read's result. The script after
+that one is. A peer that sends only one script for several gets of that
+target retires the oldest finished read and leaves the newer read still
+waiting.
 
 `representable_npc_class_script` calls the shared decoder. A trailing
 empty field in that normalized text has to come back on the same read.

@@ -802,6 +802,104 @@ fn nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save
 }
 
 #[test]
+fn nc_refused_save_stays_up_and_its_script_is_not_the_next_save() {
+    let (cue, cues) = mpsc::channel();
+    let (addr, handle) = fake_nc_hold_scripts(cues);
+    let live = LiveNc::start(addr, "labrc".into(), "labpw".into(), TIMEOUT);
+    let mut view = NcView::default();
+    pump_nc(&live, &mut view, |v| v.online.is_some());
+
+    // Both saves ask for the same text, so A's reply would observe B if
+    // the refusal had dropped A's slot.
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "return;".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("asked to read"))
+    });
+    cue.send(message(74, b"error: NPC script was not saved"))
+        .unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("refused"))
+    });
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(
+        view.log.iter().all(|line| !line.contains("observed")
+            && !line.contains("[nc closed]")
+            && !line.contains("disconnected")),
+        "{:#?}",
+        view.log
+    );
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "return;".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .filter(|line| line.contains("asked to read"))
+            .count()
+            == 2
+    });
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("already waiting")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "return;")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("does not settle a newer read"))
+    });
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("refused"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "return;")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("observed NPC script for 7"))
+    });
+    assert_eq!(view.script, Some((ScriptTarget::Npc(7), "return;".into())));
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("refused"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+
+    drop(live);
+    assert_eq!(handle.join().unwrap(), vec![115, 109, 106, 109, 106]);
+}
+
+#[test]
 fn server_tab_reads_and_saves_options_and_flags() {
     let (addr, h) = fake_gserver();
     let live = LiveSession::start(addr, params(), TIMEOUT);
