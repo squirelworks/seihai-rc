@@ -387,6 +387,22 @@ line, a disconnect (id 16) and no same-target reply are different failures.
 Another target's script is not the reply. A chat line such as `NPC script
 of <name> updated by <rc>` is not the script.
 
+The window's NPC Control worker waits for that read for the same timeout
+it used to log in. When the timeout passes and the link is still up, a
+save is the no-matching-reply failure, and another open or save for that
+target may be sent. A script reply has no request number. Reads for one
+target are paired in the order they were sent, including a read whose
+wait already ended: the next same-target script is that old read's, it is
+not shown as a newer read's script, and it is not that newer read's
+result. The script after that one is. A peer that sends only one script
+for several gets of that target retires the oldest timed-out read and
+leaves the newer read still waiting.
+
+`representable_npc_class_script` calls the shared decoder. Serialization
+with the eventual repair of escaped backslashes and trailing empty fields
+(issue #57) must recheck expected-versus-reply normalization with
+independent producer fixtures.
+
 Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
 192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s
 on the NC socket as a keepalive; the fork does not answer it.

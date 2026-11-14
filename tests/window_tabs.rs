@@ -4,8 +4,9 @@
 //! `docs/PROTOCOL.md` themselves; no egui and no display.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,21 @@ fn read_frame(s: &mut TcpStream) -> Option<Vec<u8>> {
     let mut f = vec![0u8; usize::from(u16::from_be_bytes(len))];
     s.read_exact(&mut f).ok()?;
     Some(f)
+}
+
+/// `Ok(None)` when the read times out and the socket is still open.
+fn read_frame_or_wait(s: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len = [0u8; 2];
+    match s.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    let mut f = vec![0u8; usize::from(u16::from_be_bytes(len))];
+    s.read_exact(&mut f)?;
+    Ok(Some(f))
 }
 
 fn send_msgs(s: &mut TcpStream, codec: &mut Codec, msgs: &[Vec<u8>]) {
@@ -640,6 +656,149 @@ fn nc_save_does_not_start_while_that_script_read_is_open() {
     let ids = handle.join().unwrap();
     assert_eq!(ids.iter().filter(|id| **id == 106).count(), 1, "{ids:?}");
     assert!(!ids.contains(&109), "{ids:?}");
+}
+
+fn npc_script_reply(id: u32, script: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_gint3(&mut payload, id);
+    payload.extend_from_slice(script.as_bytes());
+    message(160, &payload)
+}
+
+/// Answers the weapon list, stays connected, and sends a script only when
+/// the test asks. Script gets are not answered on their own.
+fn fake_nc_hold_scripts(cues: Receiver<Vec<u8>>) -> (String, thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let login = zlib_decompress(&read_frame(&mut stream).unwrap()).unwrap();
+        assert!(login.starts_with(b"#NCL11012"));
+        let mut codec = Codec::Plain;
+        send_msgs(&mut stream, &mut codec, &[message(163, b"shop")]);
+        stream
+            .set_read_timeout(Some(Duration::from_millis(30)))
+            .unwrap();
+        let mut ids = Vec::new();
+        loop {
+            while let Ok(msg) = cues.try_recv() {
+                send_msgs(&mut stream, &mut codec, &[msg]);
+            }
+            match read_frame_or_wait(&mut stream) {
+                Ok(Some(frame)) => {
+                    for msg in split_messages(&codec.decode(&frame).unwrap()) {
+                        ids.push(msg.id);
+                        if msg.id == 115 {
+                            send_msgs(&mut stream, &mut codec, &[message(167, b"")]);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+        ids
+    });
+    (addr, handle)
+}
+
+#[test]
+fn nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save() {
+    // Same value the worker uses for login and for a pending script read.
+    // Long enough for loopback login, short enough that this test can wait
+    // the deadline out without dropping the session.
+    let read_for = Duration::from_secs(1);
+    let (cue, cues) = mpsc::channel();
+    let (addr, handle) = fake_nc_hold_scripts(cues);
+    let live = LiveNc::start(addr, "labrc".into(), "labpw".into(), read_for);
+    let mut view = NcView::default();
+    pump_nc(&live, &mut view, |v| v.online.is_some());
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "alpha".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("no matching script"))
+    });
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("[nc closed]") && !line.contains("disconnected")),
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "beta".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .filter(|line| line.contains("asked to read"))
+            .count()
+            == 2
+    });
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("already waiting")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "alpha")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("does not settle a newer read"))
+    });
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("no matching script"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "beta")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("observed NPC script for 7"))
+    });
+    assert_eq!(view.script, Some((ScriptTarget::Npc(7), "beta".into())));
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    drop(live);
+    assert_eq!(handle.join().unwrap(), vec![115, 109, 106, 109, 106]);
 }
 
 #[test]

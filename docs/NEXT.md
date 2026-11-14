@@ -236,7 +236,14 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       112, 116) and succeed only when the reply matches the text this
       client can represent. RC chat, a class name, a weapon list and
       another target's script do not count. A match is that read, not a
-      restart. Evidence: `tests/nc_commands.rs` and `tests/window_tabs.rs`
+      restart. The window ends a script read at the login timeout. A save
+      then reports no matching reply while the link is still up, and the
+      next same-target script stays with that old read so it cannot settle
+      a newer open or save. Serialization with the eventual #57 repair
+      must recheck expected-versus-reply normalization with independent
+      producer fixtures. Evidence: `tests/nc_commands.rs` and
+      `tests/window_tabs.rs`
+      (`nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save`)
       against loopback fakes. No real client.
 
 ## Window
