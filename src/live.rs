@@ -14,11 +14,19 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::accounts::{
+    account_delete, account_get, account_list, account_set, parse_account, parse_account_list,
+    plo as accounts_plo, Account,
+};
+use crate::files::{delete_message, rename_message, split_path};
 use crate::players::{
     admin_message, disconnect_player, parse_props, plo as players_plo, private_admin_message,
     private_message, props_get, props_lines, warp_player,
 };
-use crate::rc::{Event, LoginParams, PlayerEntry, PlayerList, Session};
+use crate::rc::{
+    is_npc_server_player, npc_server_query, parse_npc_endpoint, Event, LoginParams, PlayerEntry,
+    PlayerList, Session,
+};
 
 /// How long the worker waits for an event before it looks for commands.
 const POLL: Duration = Duration::from_millis(50);
@@ -45,6 +53,28 @@ pub enum Command {
     },
     /// Read a player's props (73); the answer comes as [`Update::Props`].
     Props(u16),
+    /// List accounts matching a pattern (72); answer [`Update::Accounts`].
+    AccountList(String),
+    /// Read one account (77); answer [`Update::Account`].
+    AccountGet(String),
+    /// Save an account (78; the password is left as it is), then read it
+    /// back.
+    AccountSet(Account),
+    /// Delete an account (71), then list `%` again.
+    AccountDelete(String),
+    /// List a folder (90); answer [`Update::Dir`].
+    FilesList(String),
+    /// Fetch a file; answer [`Update::File`].
+    FileGet(String),
+    /// Send bytes as a file, then list its folder.
+    FilePut { path: String, data: Vec<u8> },
+    /// Delete a file (97), then list its folder.
+    FileDelete(String),
+    /// Rename a file in its folder (98), then list the folder.
+    FileRename { path: String, new_name: String },
+    /// Ask every `(Server)` player where its NPC-server listens (94); the
+    /// answers come as [`Update::NpcServer`].
+    FindNpcServer,
     /// Log out and end the worker.
     Quit,
 }
@@ -64,6 +94,16 @@ pub enum Update {
     Error(String),
     /// Props for a player, as the `players props` lines.
     Props { id: u16, lines: Vec<String> },
+    /// Account names from a list (70).
+    Accounts(Vec<String>),
+    /// One account as read (73).
+    Account(Account),
+    /// The files in a folder.
+    Dir { dir: String, names: Vec<String> },
+    /// A file's bytes.
+    File { path: String, data: Vec<u8> },
+    /// An NPC-server address, `HOST:PORT`, from a 79 that parsed.
+    NpcServer(String),
     /// The link is closed; the worker has ended.
     Closed(String),
 }
@@ -154,6 +194,25 @@ pub fn encode(c: &Command) -> Option<Result<(Vec<u8>, String), String>> {
         Command::Props(id) => props_get(*id)
             .map(|m| (m, String::new()))
             .map_err(|e| e.to_string()),
+        Command::AccountList(pattern) => account_list(pattern, "")
+            .map(|m| (m, String::new()))
+            .map_err(|e| e.to_string()),
+        Command::AccountGet(name) => account_get(name)
+            .map(|m| (m, String::new()))
+            .map_err(|e| e.to_string()),
+        Command::AccountSet(a) => account_set(a, "")
+            .map(|m| (m, format!("saved account {}", a.account)))
+            .map_err(|e| e.to_string()),
+        Command::AccountDelete(name) => account_delete(name)
+            .map(|m| (m, format!("deleted account {name}")))
+            .map_err(|e| e.to_string()),
+        // Files and discovery run several steps in the worker.
+        Command::FilesList(_)
+        | Command::FileGet(_)
+        | Command::FilePut { .. }
+        | Command::FileDelete(_)
+        | Command::FileRename { .. }
+        | Command::FindNpcServer => return Some(Err(String::new())),
         Command::Quit => return None,
     };
     Some(r)
@@ -190,21 +249,8 @@ fn run(
         let mut quit = false;
         loop {
             match commands.try_recv() {
-                Ok(c) => match encode(&c) {
-                    None => quit = true,
-                    Some(Err(e)) => {
-                        let _ = updates.send(Update::Error(e));
-                    }
-                    Some(Ok((bytes, note))) => match s.send_messages(&[bytes]) {
-                        Ok(()) if note.is_empty() => {}
-                        Ok(()) => {
-                            let _ = updates.send(Update::Sent(note));
-                        }
-                        Err(e) => {
-                            let _ = updates.send(Update::Error(format!("send failed: {e}")));
-                        }
-                    },
-                },
+                Ok(Command::Quit) => quit = true,
+                Ok(c) => execute(&mut s, c, timeout, &updates),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     quit = true;
@@ -227,6 +273,24 @@ fn run(
                             None => Update::Error("could not read the props reply".into()),
                         }
                     }
+                    Event::Other(id, p) if *id == accounts_plo::RC_ACCOUNTLISTGET => {
+                        match parse_account_list(p) {
+                            Some(names) => Update::Accounts(names),
+                            None => Update::Error("could not read the account list".into()),
+                        }
+                    }
+                    Event::Other(id, p) if *id == accounts_plo::RC_ACCOUNTGET => {
+                        match parse_account(p) {
+                            Some(a) => Update::Account(a),
+                            None => Update::Error("could not read the account".into()),
+                        }
+                    }
+                    Event::NpcServerAddr(a) => {
+                        if let Some(ep) = parse_npc_endpoint(&a.raw) {
+                            let _ = updates.send(Update::NpcServer(ep.socket_addr()));
+                        }
+                        Update::Event(ev.clone())
+                    }
                     _ => Update::Event(ev.clone()),
                 };
                 let end = matches!(ev, Event::Disconnect(_));
@@ -244,6 +308,133 @@ fn run(
     };
     s.close();
     let _ = updates.send(Update::Closed(why));
+}
+
+/// Run one command on the session.
+fn execute(s: &mut Session, c: Command, timeout: Duration, updates: &Sender<Update>) {
+    let send = |u: Update| {
+        let _ = updates.send(u);
+    };
+    let list = |s: &mut Session, dir: &str| match s.list_dir(dir, timeout) {
+        Ok(names) => send(Update::Dir {
+            dir: dir.to_string(),
+            names,
+        }),
+        Err(e) => send(Update::Error(format!("list {dir}: {e}"))),
+    };
+    match c {
+        Command::FilesList(dir) => list(s, &dir),
+        Command::FileGet(path) => match s.get_file(&path, timeout) {
+            Ok(data) => send(Update::File { path, data }),
+            Err(e) => send(Update::Error(format!("get {path}: {e}"))),
+        },
+        Command::FilePut { path, data } => {
+            let n = data.len();
+            match s.put_file(&path, &data, timeout) {
+                Ok(()) => send(Update::Sent(format!("sent {n} bytes as {path}"))),
+                Err(e) => send(Update::Error(format!("put {path}: {e}"))),
+            }
+            list(s, split_path(&path).0);
+        }
+        Command::FileDelete(path) => {
+            let (dir, name) = split_path(&path);
+            file_step(
+                s,
+                dir,
+                delete_message(name),
+                &path,
+                "deleted",
+                timeout,
+                updates,
+            );
+            list(s, dir);
+        }
+        Command::FileRename { path, new_name } => {
+            let (dir, name) = split_path(&path);
+            let what = format!("renamed to {new_name}");
+            file_step(
+                s,
+                dir,
+                rename_message(name, &new_name),
+                &path,
+                &what,
+                timeout,
+                updates,
+            );
+            list(s, dir);
+        }
+        Command::FindNpcServer => {
+            let ids: Vec<u16> = s
+                .players
+                .players
+                .values()
+                .filter(|e| is_npc_server_player(&e.nickname))
+                .map(|e| e.id)
+                .collect();
+            if ids.is_empty() {
+                send(Update::Error(
+                    "no (Server) player is online; this server has no NPC-server".into(),
+                ));
+                return;
+            }
+            let msgs: Vec<Vec<u8>> = ids.into_iter().map(npc_server_query).collect();
+            if let Err(e) = s.send_messages(&msgs) {
+                send(Update::Error(format!("send failed: {e}")));
+            }
+        }
+        other => {
+            let after = match &other {
+                Command::AccountSet(a) => account_get(&a.account).ok(),
+                Command::AccountDelete(_) => account_list("%", "").ok(),
+                _ => None,
+            };
+            match encode(&other) {
+                None => {}
+                Some(Err(e)) => send(Update::Error(e)),
+                Some(Ok((bytes, note))) => {
+                    let mut msgs = vec![bytes];
+                    msgs.extend(after);
+                    match s.send_messages(&msgs) {
+                        Ok(()) if note.is_empty() => {}
+                        Ok(()) => send(Update::Sent(note)),
+                        Err(e) => send(Update::Error(format!("send failed: {e}"))),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// List `dir` (the fork names a file by the folder of the last list), send
+/// `msg`, and report the server's id 67 lines.
+fn file_step(
+    s: &mut Session,
+    dir: &str,
+    msg: Result<Vec<u8>, crate::files::FileError>,
+    path: &str,
+    done: &str,
+    timeout: Duration,
+    updates: &Sender<Update>,
+) {
+    let send = |u: Update| {
+        let _ = updates.send(u);
+    };
+    let msg = match msg {
+        Ok(m) => m,
+        Err(e) => return send(Update::Error(format!("{path}: {e}"))),
+    };
+    if let Err(e) = s.list_dir(dir, timeout) {
+        return send(Update::Error(format!("list {dir}: {e}")));
+    }
+    match s.file_action(msg, Duration::from_millis(500), Instant::now() + timeout) {
+        Ok(lines) => {
+            for line in lines {
+                send(Update::Sent(format!("[server] {line}")));
+            }
+            send(Update::Sent(format!("{path} {done}")));
+        }
+        Err(e) => send(Update::Error(format!("{path}: {e}"))),
+    }
 }
 
 /// Connection state, for the window's status line.
@@ -268,6 +459,16 @@ pub struct RcView {
     pub props: Option<(u16, Vec<String>)>,
     /// Log events the command line prints only with `-v`.
     pub verbose: bool,
+    /// The last account list.
+    pub accounts: Vec<String>,
+    /// The last account read.
+    pub account: Option<Account>,
+    /// The last folder listed and its files.
+    pub dir: Option<(String, Vec<String>)>,
+    /// The last file fetched, for the window to save.
+    pub file: Option<(String, Vec<u8>)>,
+    /// NPC-server addresses found on this server.
+    pub npc_servers: Vec<String>,
 }
 
 impl RcView {
@@ -293,6 +494,22 @@ impl RcView {
             Update::Sent(note) => self.push(format!("[sent] {note}")),
             Update::Error(e) => self.push(format!("[error] {e}")),
             Update::Props { id, lines } => self.props = Some((id, lines)),
+            Update::Accounts(names) => {
+                self.push(format!("[accounts] {} listed", names.len()));
+                self.accounts = names;
+            }
+            Update::Account(a) => self.account = Some(a),
+            Update::Dir { dir, names } => self.dir = Some((dir, names)),
+            Update::File { path, data } => {
+                self.push(format!("[file] {path}: {} bytes", data.len()));
+                self.file = Some((path, data));
+            }
+            Update::NpcServer(addr) => {
+                // The event line already shows the address as sent.
+                if !self.npc_servers.contains(&addr) {
+                    self.npc_servers.push(addr);
+                }
+            }
             Update::Closed(why) => {
                 self.push(format!("[closed] {why}"));
                 self.status = Status::Closed(why);
