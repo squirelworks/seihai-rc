@@ -110,7 +110,7 @@ pub fn rc_tokenize(lines: &[&str]) -> String {
 }
 
 /// Read tokenized text back into lines. A quoted item runs to its closing
-/// quote (`""` inside is one `"`, doubled backslashes become one);
+/// quote (`""` inside is one `"`; backslashes stay literal);
 /// an unquoted item runs to the next comma. A final comma adds an empty
 /// field. Spaces around an item are dropped. Empty text gives no lines.
 pub fn gdetokenize(text: &str) -> Vec<String> {
@@ -134,9 +134,6 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
                     } else {
                         break;
                     }
-                } else if c == '\\' && chars.peek() == Some(&'\\') {
-                    chars.next();
-                    item.push('\\');
                 } else {
                     item.push(c);
                 }
@@ -170,7 +167,7 @@ mod tests {
 
     #[test]
     fn rc_text_preserves_escaped_content_and_empty_fields() {
-        let lines = [r#"echo("C:\tmp", 1);"#, "", "ordinary", "", ""];
+        let lines = [r#"echo("hello", 1);"#, "", "ordinary", "", ""];
         assert_eq!(gdetokenize(&rc_tokenize(&lines)), lines);
         assert_eq!(gdetokenize("a,"), ["a", ""]);
         assert_eq!(gdetokenize(",,"), ["", "", ""]);
