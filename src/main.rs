@@ -16,8 +16,9 @@ use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_add_message,
     npc_delete_message, npc_flags_get_message, npc_flags_set_message, npc_get_message,
     npc_reset_message, npc_script_get_message, npc_script_set_message, npc_warp_message,
+    observe_script, representable_npc_class_script, representable_weapon_script,
     weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcEvent,
-    NcSession, NewNpc,
+    NcSession, NewNpc, ScriptObservation, ScriptSubject,
 };
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, edit_flags,
@@ -90,6 +91,11 @@ USAGE:
   seihai-rc nc weapon get NAME (--server ... | --discover ...) --account NAME
   seihai-rc nc weapon set NAME --image IMG --script TEXT (--server ... | --discover ...)
   seihai-rc nc weapon delete NAME (--server ... | --discover ...) --account NAME
+
+  A script set sends the save, then the get for that same NPC, class or
+  weapon. It prints observed only when that reply's script matches the
+  text this client can represent. Chat, a class name, a weapon list and
+  another target do not count. The match is that read, not a later restart.
 
   servers       Log in to the listserver's RC list and print every server.
   login         Log in to a gserver and print server messages and the RC
@@ -227,7 +233,9 @@ OPTIONS:
                        ask for the NPC-server address before connecting.
   --script TEXT        Script for npc set, class set and weapon set.
                        npc get --script reads the script instead of the
-                       attributes. A script with a line break is not sent.
+                       attributes. Line breaks are sent: tokenized for an
+                       NPC or class, 0xA7 for a weapon. A set then reads
+                       that script back.
   --script-file PATH   Read the script from a file, instead of --script.
   --image NAME         Weapon image for weapon set.
   --set VALUE          players comments: the new comments (one line).
@@ -1953,17 +1961,61 @@ fn cmd_nc_npc_get(o: &Opts, id_text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn read_script_back(
+    mut session: NcSession,
+    o: &Opts,
+    c: &Common,
+    set_msg: Vec<u8>,
+    get_msg: Vec<u8>,
+    subject: ScriptSubject,
+    expected: &str,
+) -> Result<(), String> {
+    session
+        .send(&[set_msg, get_msg])
+        .map_err(|e| e.to_string())?;
+    let quiet = Duration::from_millis(o.settle.unwrap_or(1000));
+    let events = session
+        .settle(quiet, Instant::now() + c.timeout)
+        .map_err(|e| e.to_string())?;
+    if o.verbose {
+        for event in &events {
+            eprintln!("{}", nc_verbose(event));
+        }
+    }
+    let observation = observe_script(&subject, expected, &events);
+    match observation.outcome_line(&subject, expected.len()) {
+        Ok(line) => {
+            println!("{line}");
+            session.close();
+            Ok(())
+        }
+        Err(error) => {
+            session.close();
+            if matches!(observation, ScriptObservation::NoMatchingReply) {
+                Err(format!("{error}; saw {}", seen(&events)))
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 fn cmd_nc_npc_set(o: &Opts, id_text: &str) -> Result<(), String> {
     let id = parse_npc_id(id_text)?;
     let script = load_script(o)?;
-    let msg = npc_script_set_message(id, &script).map_err(|e| e.to_string())?;
+    let set_msg = npc_script_set_message(id, &script).map_err(|e| e.to_string())?;
+    let get_msg = npc_script_get_message(id).map_err(|e| e.to_string())?;
     let c = common(o)?;
-    let mut session = connect_nc(o, &c)?;
-    session.send(&[msg]).map_err(|e| e.to_string())?;
-    settle_nc(&mut session, o, &c)?;
-    println!("sent NPC script for {id}");
-    session.close();
-    Ok(())
+    let session = connect_nc(o, &c)?;
+    read_script_back(
+        session,
+        o,
+        &c,
+        set_msg,
+        get_msg,
+        ScriptSubject::Npc(id),
+        &representable_npc_class_script(&script),
+    )
 }
 
 fn cmd_nc_npc_delete(o: &Opts, id_text: &str) -> Result<(), String> {
@@ -2162,14 +2214,19 @@ fn cmd_nc_class_get(o: &Opts, name: &str) -> Result<(), String> {
 
 fn cmd_nc_class_set(o: &Opts, name: &str) -> Result<(), String> {
     let script = load_script(o)?;
-    let msg = class_set_message(name, &script).map_err(|e| e.to_string())?;
+    let set_msg = class_set_message(name, &script).map_err(|e| e.to_string())?;
+    let get_msg = class_get_message(name).map_err(|e| e.to_string())?;
     let c = common(o)?;
-    let mut session = connect_nc(o, &c)?;
-    session.send(&[msg]).map_err(|e| e.to_string())?;
-    settle_nc(&mut session, o, &c)?;
-    println!("sent class {name}");
-    session.close();
-    Ok(())
+    let session = connect_nc(o, &c)?;
+    read_script_back(
+        session,
+        o,
+        &c,
+        set_msg,
+        get_msg,
+        ScriptSubject::Class(name.to_string()),
+        &representable_npc_class_script(&script),
+    )
 }
 
 fn cmd_nc_class_delete(o: &Opts, name: &str) -> Result<(), String> {
@@ -2242,14 +2299,19 @@ fn cmd_nc_weapon_get(o: &Opts, name: &str) -> Result<(), String> {
 fn cmd_nc_weapon_set(o: &Opts, name: &str) -> Result<(), String> {
     let image = o.image.clone().ok_or("weapon set needs --image NAME")?;
     let script = load_script(o)?;
-    let msg = weapon_set_message(name, &image, &script).map_err(|e| e.to_string())?;
+    let set_msg = weapon_set_message(name, &image, &script).map_err(|e| e.to_string())?;
+    let get_msg = weapon_get_message(name).map_err(|e| e.to_string())?;
     let c = common(o)?;
-    let mut session = connect_nc(o, &c)?;
-    session.send(&[msg]).map_err(|e| e.to_string())?;
-    settle_nc(&mut session, o, &c)?;
-    println!("sent weapon {name}");
-    session.close();
-    Ok(())
+    let session = connect_nc(o, &c)?;
+    read_script_back(
+        session,
+        o,
+        &c,
+        set_msg,
+        get_msg,
+        ScriptSubject::Weapon(name.to_string()),
+        &representable_weapon_script(&script),
+    )
 }
 
 fn cmd_nc_weapon_delete(o: &Opts, name: &str) -> Result<(), String> {

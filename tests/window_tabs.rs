@@ -3,8 +3,10 @@
 //! servers on ephemeral loopback ports. The fakes write their replies from
 //! `docs/PROTOCOL.md` themselves; no egui and no display.
 
-use std::io::{Read, Write};
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,7 +16,9 @@ use seihai_rc::link::Codec;
 use seihai_rc::live::{Command, LiveSession, RcView, ServerKind};
 use seihai_rc::live_nc::{LiveNc, NcCommand, NcView, ScriptTarget};
 use seihai_rc::rc::{LoginParams, RcKind};
-use seihai_rc::wire::{gchar, message, push_gint3, push_gint5, push_gshort, push_gstring, text};
+use seihai_rc::wire::{
+    gchar, message, push_gint3, push_gint5, push_gshort, push_gstring, read_gstring, text,
+};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,6 +28,21 @@ fn read_frame(s: &mut TcpStream) -> Option<Vec<u8>> {
     let mut f = vec![0u8; usize::from(u16::from_be_bytes(len))];
     s.read_exact(&mut f).ok()?;
     Some(f)
+}
+
+/// `Ok(None)` when the read times out and the socket is still open.
+fn read_frame_or_wait(s: &mut TcpStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len = [0u8; 2];
+    match s.read_exact(&mut len) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    let mut f = vec![0u8; usize::from(u16::from_be_bytes(len))];
+    s.read_exact(&mut f)?;
+    Ok(Some(f))
 }
 
 fn send_msgs(s: &mut TcpStream, codec: &mut Codec, msgs: &[Vec<u8>]) {
@@ -437,6 +456,8 @@ fn fake_nc() -> (String, thread::JoinHandle<Vec<Message>>) {
             &[message(158, &row), message(163, b"shop")],
         );
         let mut weapons = vec!["bomb".to_string()];
+        let mut npc_scripts: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut weapon_bodies: HashMap<String, (String, Vec<u8>)> = HashMap::new();
         let mut seen = Vec::new();
         while let Some(frame) = read_frame(&mut s) {
             for m in split_messages(&codec.decode(&frame).unwrap()) {
@@ -449,24 +470,39 @@ fn fake_nc() -> (String, thread::JoinHandle<Vec<Message>>) {
                         vec![message(167, &p)]
                     }
                     116 => {
-                        let mut p = Vec::new();
-                        push_gstring(&mut p, b"bomb");
-                        p.push(gchar(0));
-                        push_gstring(&mut p, b"wbomb1.png");
-                        p.push(gchar(1));
-                        push_gshort(&mut p, 7);
-                        p.extend_from_slice(b"return;");
-                        vec![message(33, &p)]
+                        let name = text(&m.payload);
+                        let (image, script) = weapon_bodies
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_else(|| ("wbomb1.png".into(), b"return;".to_vec()));
+                        vec![weapon_script_reply(&name, &image, &script)]
                     }
                     106 => {
+                        let id = read_gint3(&m.payload).unwrap_or(0) as u32;
+                        let script = npc_scripts
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_else(|| b"// door".to_vec());
                         let mut p = Vec::new();
-                        push_gint3(&mut p, 1001);
-                        p.extend_from_slice(b"// door");
+                        push_gint3(&mut p, id);
+                        p.extend_from_slice(&script);
                         vec![message(160, &p)]
                     }
+                    109 => {
+                        if let Some(id) = read_gint3(&m.payload) {
+                            npc_scripts.insert(id as u32, m.payload[3..].to_vec());
+                        }
+                        vec![message(74, b"NPC script of door updated by labrc")]
+                    }
                     117 => {
-                        let n = usize::from(m.payload[0] - 0x20);
-                        weapons.push(text(&m.payload[1..1 + n]));
+                        let mut i = 0;
+                        let name = text(&read_gstring(&m.payload, &mut i).unwrap_or_default());
+                        let image = text(&read_gstring(&m.payload, &mut i).unwrap_or_default());
+                        let script = m.payload.get(i..).unwrap_or_default().to_vec();
+                        if !name.is_empty() {
+                            weapon_bodies.insert(name.clone(), (image, script));
+                            weapons.push(name);
+                        }
                         vec![]
                     }
                     _ => vec![],
@@ -534,11 +570,333 @@ fn nc_tab_lists_opens_and_saves() {
     });
     pump_nc(&live, &mut view, |v| v.lists.weapons.len() == 2);
     assert_eq!(view.lists.weapons, vec!["bomb", "lantern"]);
+    assert!(
+        view.log
+            .iter()
+            .any(|line| line.contains("observed NPC script for 1001")),
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .any(|line| line.contains("observed weapon lantern")),
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log.iter().all(|line| !line.contains("saved")),
+        "{:#?}",
+        view.log
+    );
 
     drop(live);
     let seen = h.join().unwrap();
     let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
-    assert_eq!(ids, vec![115, 116, 106, 109, 117, 115]);
+    assert_eq!(ids, vec![115, 116, 106, 109, 106, 117, 116, 115]);
+}
+
+fn weapon_script_reply(name: &str, image: &str, script: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_gstring(&mut payload, name.as_bytes());
+    payload.push(gchar(0));
+    push_gstring(&mut payload, image.as_bytes());
+    payload.push(gchar(1));
+    push_gshort(&mut payload, script.len() as u16);
+    payload.extend_from_slice(script);
+    message(33, &payload)
+}
+
+/// Answers the weapon list and never answers a script get.
+fn fake_nc_hold_script() -> (String, thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        let login = zlib_decompress(&read_frame(&mut stream).unwrap()).unwrap();
+        assert!(login.starts_with(b"#NCL11012"));
+        let mut codec = Codec::Plain;
+        // Login returns on the first message. Without one, both sides wait.
+        send_msgs(&mut stream, &mut codec, &[message(163, b"shop")]);
+        let mut ids = Vec::new();
+        while let Some(frame) = read_frame(&mut stream) {
+            for msg in split_messages(&codec.decode(&frame).unwrap()) {
+                ids.push(msg.id);
+                if msg.id == 115 {
+                    send_msgs(&mut stream, &mut codec, &[message(167, b"")]);
+                }
+            }
+        }
+        ids
+    });
+    (addr, handle)
+}
+
+#[test]
+fn nc_save_does_not_start_while_that_script_read_is_open() {
+    let (addr, handle) = fake_nc_hold_script();
+    let live = LiveNc::start(addr, "labrc".into(), "labpw".into(), TIMEOUT);
+    let mut view = NcView::default();
+    pump_nc(&live, &mut view, |v| v.online.is_some());
+    live.send(NcCommand::NpcScript(7));
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "return;".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("already waiting"))
+    });
+    assert!(
+        view.log.iter().all(|line| !line.contains("observed")),
+        "{:#?}",
+        view.log
+    );
+    drop(live);
+    let ids = handle.join().unwrap();
+    assert_eq!(ids.iter().filter(|id| **id == 106).count(), 1, "{ids:?}");
+    assert!(!ids.contains(&109), "{ids:?}");
+}
+
+fn npc_script_reply(id: u32, script: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    push_gint3(&mut payload, id);
+    payload.extend_from_slice(script.as_bytes());
+    message(160, &payload)
+}
+
+/// Answers the weapon list, stays connected, and sends a script only when
+/// the test asks. Script gets are not answered on their own.
+fn fake_nc_hold_scripts(cues: Receiver<Vec<u8>>) -> (String, thread::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let login = zlib_decompress(&read_frame(&mut stream).unwrap()).unwrap();
+        assert!(login.starts_with(b"#NCL11012"));
+        let mut codec = Codec::Plain;
+        send_msgs(&mut stream, &mut codec, &[message(163, b"shop")]);
+        stream
+            .set_read_timeout(Some(Duration::from_millis(30)))
+            .unwrap();
+        let mut ids = Vec::new();
+        loop {
+            while let Ok(msg) = cues.try_recv() {
+                send_msgs(&mut stream, &mut codec, &[msg]);
+            }
+            match read_frame_or_wait(&mut stream) {
+                Ok(Some(frame)) => {
+                    for msg in split_messages(&codec.decode(&frame).unwrap()) {
+                        ids.push(msg.id);
+                        if msg.id == 115 {
+                            send_msgs(&mut stream, &mut codec, &[message(167, b"")]);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+        ids
+    });
+    (addr, handle)
+}
+
+#[test]
+fn nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save() {
+    // Same value the worker uses for login and for a pending script read.
+    // Long enough for loopback login, short enough that this test can wait
+    // the deadline out without dropping the session.
+    let read_for = Duration::from_secs(1);
+    let (cue, cues) = mpsc::channel();
+    let (addr, handle) = fake_nc_hold_scripts(cues);
+    let live = LiveNc::start(addr, "labrc".into(), "labpw".into(), read_for);
+    let mut view = NcView::default();
+    pump_nc(&live, &mut view, |v| v.online.is_some());
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "alpha".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("no matching script"))
+    });
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("[nc closed]") && !line.contains("disconnected")),
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "beta".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .filter(|line| line.contains("asked to read"))
+            .count()
+            == 2
+    });
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("already waiting")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "alpha")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("does not settle a newer read"))
+    });
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("no matching script"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "beta")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("observed NPC script for 7"))
+    });
+    assert_eq!(view.script, Some((ScriptTarget::Npc(7), "beta".into())));
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    drop(live);
+    assert_eq!(handle.join().unwrap(), vec![115, 109, 106, 109, 106]);
+}
+
+#[test]
+fn nc_refused_save_stays_up_and_its_script_is_not_the_next_save() {
+    let (cue, cues) = mpsc::channel();
+    let (addr, handle) = fake_nc_hold_scripts(cues);
+    let live = LiveNc::start(addr, "labrc".into(), "labpw".into(), TIMEOUT);
+    let mut view = NcView::default();
+    pump_nc(&live, &mut view, |v| v.online.is_some());
+
+    // Both saves ask for the same text, so A's reply would observe B if
+    // the refusal had dropped A's slot.
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "return;".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("asked to read"))
+    });
+    cue.send(message(74, b"error: NPC script was not saved"))
+        .unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log.iter().any(|line| line.contains("refused"))
+    });
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(
+        view.log.iter().all(|line| !line.contains("observed")
+            && !line.contains("[nc closed]")
+            && !line.contains("disconnected")),
+        "{:#?}",
+        view.log
+    );
+
+    live.send(NcCommand::NpcScriptSet {
+        id: 7,
+        script: "return;".into(),
+    });
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .filter(|line| line.contains("asked to read"))
+            .count()
+            == 2
+    });
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("already waiting")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "return;")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("does not settle a newer read"))
+    });
+    assert!(view.script.is_none(), "{:?}", view.script);
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("refused"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+    assert!(
+        view.log
+            .iter()
+            .all(|line| !line.contains("observed") && !line.contains("other script text")),
+        "{:#?}",
+        view.log
+    );
+
+    cue.send(npc_script_reply(7, "return;")).unwrap();
+    pump_nc(&live, &mut view, |v| {
+        v.log
+            .iter()
+            .any(|line| line.contains("observed NPC script for 7"))
+    });
+    assert_eq!(view.script, Some((ScriptTarget::Npc(7), "return;".into())));
+    assert!(view.online.is_some(), "{:#?}", view.log);
+    assert_eq!(
+        view.log
+            .iter()
+            .filter(|line| line.contains("refused"))
+            .count(),
+        1,
+        "{:#?}",
+        view.log
+    );
+
+    drop(live);
+    assert_eq!(handle.join().unwrap(), vec![115, 109, 106, 109, 106]);
 }
 
 #[test]
