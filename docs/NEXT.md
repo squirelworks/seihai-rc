@@ -290,3 +290,20 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Evidence: GUI regression test in `src/ui.rs`; this does not replace
       the outstanding real-fork run of the four tabs.
 - [ ] Later: the macOS polish (owner's polishing phase).
+
+## NPC Control readback follow-up
+
+- [x] Retain trailing empty fields (#57, partial #56).
+      Decoder and NPC/class reply regressions cover quotes,
+      backslashes and internal/trailing empty lines. Empty input still has no
+      fields; saving still omits one final line feed, separately from decoding.
+- [ ] Escaped-backslash replies (#56): the current Rust server preserves
+      literal backslashes, while an escaping producer doubles them. Identical
+      payloads are ambiguous; generic decoding preserves literals. Supporting
+      escaped producers requires an explicit producer contract, not guessing
+      from bytes. #57 does not resolve this part of #56.
+- [ ] Real-fork GUI acceptance remains outstanding (#27), including reopening,
+      editing and saving scripts after reconnect or target switches. This parser
+      repair does not add correlated save acceptance: transport success and
+      chat/list notifications do not establish accepted content. A same-target
+      GET observes content at that instant, not persistence across restart.
