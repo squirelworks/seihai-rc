@@ -221,6 +221,23 @@ impl App {
         }
     }
 
+    /// Every editor and the NPC-Control connection belong to one game
+    /// server. Drop them before starting another login, even to the same
+    /// address with a different staff account.
+    fn reset_server_tabs(&mut self) {
+        self.tab = Tab::Players;
+        self.accounts = AccountsTab::default();
+        self.files = FilesTab::default();
+        self.nc = NcTab::default();
+        self.server = ServerTab::default();
+        self.actions = Actions {
+            x: "30".into(),
+            y: "30".into(),
+            ..Default::default()
+        };
+        self.chat.clear();
+    }
+
     fn connect(&mut self) {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -228,6 +245,7 @@ impl App {
             .unwrap_or(0);
         match self.form.params((nanos >> 10) as u8) {
             Ok((addr, params)) => {
+                self.reset_server_tabs();
                 self.form_error = None;
                 self.view = RcView {
                     verbose: self.view.verbose,
@@ -1102,5 +1120,60 @@ mod nc_editor_tests {
         assert!(!tab.delete_armed);
         assert!(tab.ready, "a deliberately new script may start empty");
         assert!(tab.text.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn another_login_clears_the_previous_servers_editors_and_confirmations() {
+        let mut app = App::new(LoginForm::default());
+        app.tab = Tab::Server;
+        app.accounts.selected = Some("oldstaff".into());
+        app.accounts.loaded = Some(Account::default());
+        app.accounts.edit.email = "old@example.invalid".into();
+        app.accounts.delete_armed = true;
+        app.files.selected = Some("old/file.txt".into());
+        app.files.save_to = Some(("old/file.txt".into(), "download.txt".into()));
+        app.files.delete_armed = true;
+        app.nc.addr = "127.0.0.1:14804".into();
+        app.nc.target = Some(ScriptTarget::Npc(42));
+        app.nc.text = "old script".into();
+        app.nc.delete_armed = true;
+        app.server.text = "old options".into();
+        app.server.asked.insert(ServerKind::Options);
+        app.server
+            .loaded
+            .insert(ServerKind::Options, vec!["old options".into()]);
+        app.server.save_armed = true;
+        app.actions.kick_armed = Some(7);
+        app.chat = "old chat".into();
+
+        app.reset_server_tabs();
+
+        assert_eq!(app.tab, Tab::Players);
+        assert!(app.accounts.selected.is_none());
+        assert!(app.accounts.loaded.is_none());
+        assert!(app.accounts.edit.email.is_empty());
+        assert!(!app.accounts.delete_armed);
+        assert!(app.files.selected.is_none());
+        assert!(app.files.save_to.is_none());
+        assert!(!app.files.delete_armed);
+        assert!(app.nc.addr.is_empty());
+        assert!(app.nc.target.is_none());
+        assert!(app.nc.text.is_empty());
+        assert!(!app.nc.delete_armed);
+        assert!(app.nc.live.is_none());
+        assert!(app.server.text.is_empty());
+        assert!(
+            app.server.asked.is_empty(),
+            "the new server needs a fresh read"
+        );
+        assert!(app.server.loaded.is_empty());
+        assert!(!app.server.save_armed);
+        assert!(app.actions.kick_armed.is_none());
+        assert!(app.chat.is_empty());
     }
 }

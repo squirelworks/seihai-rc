@@ -271,4 +271,9 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Existing scripts cannot be edited/saved while their read is pending.
       Every selection/new target disarms Delete. Evidence: GUI regressions
       in `src/ui.rs`; no real-fork or macOS runtime run for this fix.
+- [x] Starting another login clears the previous server's account and file
+      forms, pending download, NPC-Control connection and editor, server
+      read cache, and armed actions. Each new server is read afresh.
+      Evidence: GUI regression test in `src/ui.rs`; this does not replace
+      the outstanding real-fork run of the four tabs.
 - [ ] Later: the macOS polish (owner's polishing phase).
