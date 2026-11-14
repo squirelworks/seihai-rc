@@ -398,10 +398,12 @@ result. The script after that one is. A peer that sends only one script
 for several gets of that target retires the oldest timed-out read and
 leaves the newer read still waiting.
 
-`representable_npc_class_script` calls the shared decoder. Serialization
-with the eventual repair of escaped backslashes and trailing empty fields
-(issue #57) must recheck expected-versus-reply normalization with
-independent producer fixtures.
+`representable_npc_class_script` calls the shared decoder. A trailing
+empty field in that normalized text has to come back on the same read.
+An independent reply that drops it, or adds another, is not a match.
+Issue #56's escaped-producer contract is still open. A match is the
+script observed on that read. It does not show that the script is still
+there after a restart.
 
 Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
 192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s

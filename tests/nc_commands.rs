@@ -12,10 +12,10 @@ use seihai_core::protocol::{read_gshort, split_messages, zlib_decompress, Messag
 use seihai_rc::link::Codec;
 use seihai_rc::nc::{
     npc_delete_message, npc_get_message, npc_script_get_message, npc_script_set_message,
-    weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcSession,
-    NC_CLASS_DELETE, NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET, NC_CLASS_NAME, NC_CLASS_SCRIPT,
-    NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT, NC_WEAPON_NAMES,
-    NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
+    representable_npc_class_script, weapon_delete_message, weapon_get_message, weapon_list_message,
+    weapon_set_message, NcSession, NC_CLASS_DELETE, NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET,
+    NC_CLASS_NAME, NC_CLASS_SCRIPT, NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT,
+    NC_WEAPON_NAMES, NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
 };
 use seihai_rc::rc::{discover_npc_servers, LoginParams, RcKind};
 use seihai_rc::wire::{gchar, message, push_gint3, push_gshort, push_gstring};
@@ -790,6 +790,69 @@ fn weapon_script_reply(name: &str, image: &str, script: &[u8]) -> Vec<u8> {
     push_gshort(&mut payload, script.len() as u16);
     payload.extend_from_slice(script);
     message(NC_WEAPON_SCRIPT, &payload)
+}
+
+/// Id 160 whose script bytes are a fixture, not this client's set encoding.
+fn npc_script_reply(id: u32, script_on_wire: &[u8]) -> Vec<u8> {
+    let mut payload = gint3_only(id);
+    payload.extend_from_slice(script_on_wire);
+    message(NC_NPC_SCRIPT, &payload)
+}
+
+#[test]
+fn npc_save_readback_keeps_a_trailing_empty_field() {
+    // One final line feed is omitted on a set. The empty field before that
+    // stays in the text this client can represent. The reply fixtures quote
+    // every field, including the empty one, so they are not the bytes this
+    // client writes.
+    let script = "lab line\n\n";
+    let expected = representable_npc_class_script(script);
+    assert_eq!(expected, "lab line\n");
+    let set = npc_script_set_message(12, script).unwrap();
+    let get = npc_script_get_message(12).unwrap();
+    let messages = vec![parts(&set), parts(&get)];
+    let quoted_match = b"\"lab line\",\"\"";
+    let dropped = b"\"lab line\"";
+    let extra = b"\"lab line\",\"\",\"\"";
+    assert_ne!(&set[4..], quoted_match);
+    assert_ne!(&set[4..], dropped);
+    assert_ne!(&set[4..], extra);
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![npc_script_reply(12, quoted_match)],
+    });
+    let output = npc_set(&addr, script);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "observed NPC script for 12\n");
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages: messages.clone(),
+        reply: vec![npc_script_reply(12, dropped)],
+    });
+    let output = npc_set(&addr, script);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("other script text"), "{err}");
+    assert!(err.contains("(8 bytes)"), "{err}");
+    assert!(err.contains("(9 bytes)"), "{err}");
+    assert!(!stdout(&output).contains("observed"), "{}", stdout(&output));
+    handle.join().unwrap();
+
+    let (addr, handle) = fake_nc(NcPlan::Expect {
+        messages,
+        reply: vec![npc_script_reply(12, extra)],
+    });
+    let output = npc_set(&addr, script);
+    assert!(!output.status.success(), "{}", stdout(&output));
+    let err = stderr(&output);
+    assert!(err.contains("other script text"), "{err}");
+    assert!(err.contains("(10 bytes)"), "{err}");
+    assert!(err.contains("(9 bytes)"), "{err}");
+    assert!(!err.contains("no matching script"), "{err}");
+    assert!(!stdout(&output).contains("observed"), "{}", stdout(&output));
+    handle.join().unwrap();
 }
 
 fn npc_set(addr: &str, script: &str) -> Output {

@@ -239,9 +239,11 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       restart. The window ends a script read at the login timeout. A save
       then reports no matching reply while the link is still up, and the
       next same-target script stays with that old read so it cannot settle
-      a newer open or save. Serialization with the eventual #57 repair
-      must recheck expected-versus-reply normalization with independent
-      producer fixtures. Evidence: `tests/nc_commands.rs` and
+      a newer open or save. A trailing empty field stays in the normalized
+      text: an independent reply matches only when that field is still
+      there. Issue #56's escaped-producer contract is still open.
+      Evidence: `tests/nc_commands.rs`
+      (`npc_save_readback_keeps_a_trailing_empty_field`) and
       `tests/window_tabs.rs`
       (`nc_save_expires_while_the_peer_stays_up_and_a_late_reply_is_not_the_next_save`)
       against loopback fakes. No real client.
