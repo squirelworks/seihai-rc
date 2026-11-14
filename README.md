@@ -120,7 +120,8 @@ disconnect (click twice). The bar under the chat sends an RC chat line or
 an admin message to everyone. The session runs on its own thread
 (`src/live.rs`), so the window never waits on the network. Accounts,
 files, server options and NPC Control stay on the command line for now.
-Linux needs X11 or Wayland and OpenGL at run time.
+The window needs Rust 1.95 or newer to build (egui 0.37); the command line
+builds on older toolchains. Linux needs X11 or Wayland and OpenGL at run time.
 
 The tests run the client against small fake servers on loopback. Lab runs
 against the gserver-v2 fork are recorded in [docs/lab](docs/lab).
