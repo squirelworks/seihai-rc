@@ -21,9 +21,10 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
       (PR #21, issue #19).
 - [x] Read `PLO_OTHERPLPROPS` (8) for RCs and update `PlayerList`: a listed
       id gets the nickname, level, status or community it carries, shown as
-      `[update]`; an unlisted id is not added. Whether the fork sends 8 to an
-      RC is still **check**. Evidence: unit test and fake gserver. No real
-      client.
+      `[update]`; an unlisted id is not added. The fork sends 8 to an RC
+      for the props it broadcasts (a head change, RC nicknames), not for
+      gralats or gani. Evidence: unit test, fake gserver, and the fork run
+      of 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
 - [x] `--nick` default: with no `--nick` the CLI sends `*account`. Real RCs
       always send a nickname, and `*account` is what the fork shows for an RC
       that sends none, so the screen is the same and the wire matches a real
@@ -32,8 +33,9 @@ they are relied on; write what you see into `docs/PROTOCOL.md`.
       the `--tsv` fields.
 - [x] Optional identity string after the password in the type-6 login:
       `--identity TEXT`, sent as the rest of the login line, off by default
-      and refused with `--rc classic`. The text the fork expects is
-      **check**. Evidence: unit test and fake gserver.
+      and refused with `--rc classic`. The fork takes any text: it sets
+      the platform to it and forwards it to its listserver. Evidence: unit
+      test, fake gserver and the fork run of 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
 - [x] Upstream gs2lib packet names: `PLI_PONG` (162, was `PLI_PING`) and
       `PLO_RC_UNKNOWN124` (124, was `PLO_RC_PLAYERFLAGS`). Names only.
 - [x] A test against the real seihai-listserver, not only the fake one:
@@ -114,7 +116,11 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       prop table, which reads the captured 72s; a set reads back every
       prop, flag and weapon it changed and fails if one differs.
       Evidence: unit tests in `src/players.rs` and
-      `tests/fake_servers.rs`. No real client set the new names.
+      `tests/fake_servers.rs`. Fork run 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`):
+      sword, shield, magic, kills, deaths, x, y, head, body, gani, colors,
+      flags and weapons stored and read back. Bomb power and level (on an
+      account not online) are not kept by the fork (seihai-gserver-v2 #83);
+      seihai-rc reports both.
 - [x] Fork: send the stored flags in 72, so a props set keeps them. Done in
       seihai-gserver-v2 (flags kept on load; `CHANGES-SEIHAI.md`, checked
       with a real 2.22 RC, and with the 2004 RC on 2026-11-13).
@@ -123,7 +129,8 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       RCs are listed through the normal player list, where an RC is a player
       with an empty level. So it is built from `PlayerList` and `is_rc()`,
       with no new packet ([Graal_analysis RC write-up](https://github.com/squirelworks/Graal_analysis/issues/410),
-      2026-11-12). Tested against the fake gserver; not yet run in the lab.
+      2026-11-12). Tested against the fake gserver and in the fork run of
+      2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
 
 ## Stage 3: accounts
 
@@ -139,8 +146,8 @@ Command line: `seihai-rc players pm ID TEXT`, `players say TEXT` (message all),
       the rest of the line, as the 2004 RC sends it from its account menu.
       Evidence: `docs/lab/2026-11-13-archived-rc-captures.md` (second pass) and a unit test.
 - [x] Fork: keep load only, admin level and admin worlds from 78 and 70.
-      Done in seihai-gserver-v2 (`CHANGES-SEIHAI.md`). `seihai-rc` has not
-      been re-run against it.
+      Done in seihai-gserver-v2 (`CHANGES-SEIHAI.md`). Checked with
+      `seihai-rc accounts set` against the fork on 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
 
 ## Stage 4: server
 
@@ -237,7 +244,9 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       `tests/live_session.rs` (fake gserver, both login types: every
       command's bytes, props, a closed link and a refused login), and a
       screenshot under Xvfb against a loopback stand-in. CI builds and
-      lints it on Linux and Windows. Not yet driven against the fork.
+      lints it on Linux and Windows. Logged in to the fork and showed its
+      players on 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
+      Needs rustc 1.95 (eframe 0.37); the command line builds on older.
 - [ ] Later, as the owner wants them: accounts, files, server options and
       NPC Control in the window (they are on the command line), and the
       macOS polish (owner's polishing phase).

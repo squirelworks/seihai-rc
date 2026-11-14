@@ -68,8 +68,10 @@ prop 53; rc133 (`GSERV014`) sends no nickname (lab 2026-11-13).
 A type-6 login may carry more text after the password GSTRING, up to the line
 feed: an identity string. The 2004 RC sends none. RC3 (`GSERV025`) sends it
 tokenized: `win,<32 hex>,"",<32 hex>` (platform, a machine id, an empty item,
-a second machine id), and the fork accepted it (lab 2026-11-13). `seihai-rc`
-sends it only with `--identity TEXT`.
+a second machine id), and the fork accepted it (lab 2026-11-13). The fork
+takes any text there as the platform and forwards it to its listserver
+(`--identity test`, lab 2026-11-14). `seihai-rc` sends it only with
+`--identity TEXT`.
 
 Older RCs log in with type 1 and plain zlib both ways: `GSERV019` to
 `GSERV023` (2000/8/19 to 2002/05/02) and `GSERV014` (rc133). The fork let
@@ -85,7 +87,9 @@ fixes that).
 `PLO_OTHERPLPROPS` (8) is GSHORT id, then props as in `ADDPLAYER`. If it comes
 for a listed id, seihai-rc applies the nickname, level, list status and
 community name it carries and shows `[update]`; reading stops at any other
-prop. Whether the fork sends 8 to an RC is **check**. RC chat lines go out as
+prop. The fork sends 8 to an RC for the props it broadcasts: a head change
+arrived as `28 2023 2b 8d head5.png`, and RC nicknames the same way; a gralats
+or gani set sent none (lab 2026-11-14). RC chat lines go out as
 `PLI_RC_CHAT` (79) + text.
 
 While the session is open, seihai-rc sends id 162 with an empty body every
