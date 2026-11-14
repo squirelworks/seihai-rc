@@ -941,6 +941,29 @@ mod tests {
     }
 
     #[test]
+    fn script_readback_preserves_escaped_lines_and_save_newline_rule() {
+        let script = "echo(\"C:\\tmp\", 1);\n\nordinary\n\n";
+        let encoded = latin1_bytes(&rc_tokenize(&script.split('\n').collect::<Vec<_>>()));
+        let mut npc = Vec::new();
+        push_gint3(&mut npc, 1001);
+        npc.extend_from_slice(&encoded);
+        assert_eq!(parse_npc_script(&npc), Some((1001, script.into())));
+        let mut class = Vec::new();
+        push_gstring(&mut class, b"Guard");
+        class.extend_from_slice(&encoded);
+        assert_eq!(
+            parse_class_script(&class),
+            Some(("Guard".into(), script.into()))
+        );
+        // Saving intentionally omits one final LF, not every trailing empty line.
+        let saved = npc_script_set_message(1001, script).unwrap();
+        assert_eq!(
+            parse_npc_script(&saved[1..]),
+            Some((1001, script.strip_suffix('\n').unwrap().into()))
+        );
+    }
+
+    #[test]
     fn npc_add_warp_and_flags_match_the_2004_rc() {
         let add = npc_add_message(&NewNpc {
             name: "labnpc".into(),

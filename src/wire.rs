@@ -110,8 +110,9 @@ pub fn rc_tokenize(lines: &[&str]) -> String {
 }
 
 /// Read tokenized text back into lines. A quoted item runs to its closing
-/// quote (`""` inside is one `"`); an unquoted item runs to the next comma.
-/// Spaces around an item are dropped. Empty text gives no lines.
+/// quote (`""` inside is one `"`, doubled backslashes become one);
+/// an unquoted item runs to the next comma. A final comma adds an empty
+/// field. Spaces around an item are dropped. Empty text gives no lines.
 pub fn gdetokenize(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = text.chars().peekable();
@@ -133,6 +134,9 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
                     } else {
                         break;
                     }
+                } else if c == '\\' && chars.peek() == Some(&'\\') {
+                    chars.next();
+                    item.push('\\');
                 } else {
                     item.push(c);
                 }
@@ -153,6 +157,9 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
             item = item.trim_end().to_string();
         }
         out.push(item);
+        if text.ends_with(',') && chars.peek().is_none() {
+            out.push(String::new());
+        }
     }
     out
 }
@@ -160,6 +167,17 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rc_text_preserves_escaped_content_and_empty_fields() {
+        let lines = [r#"echo("C:\tmp", 1);"#, "", "ordinary", "", ""];
+        assert_eq!(gdetokenize(&rc_tokenize(&lines)), lines);
+        assert_eq!(gdetokenize("a,"), ["a", ""]);
+        assert_eq!(gdetokenize(",,"), ["", "", ""]);
+        assert_eq!(gdetokenize(r#""a,""b"",c""#), ["a,\"b\",c"]);
+        assert_eq!(gdetokenize(r#"C:\tmp"#), [r#"C:\tmp"#]);
+        assert!(gdetokenize("").is_empty());
+    }
 
     #[test]
     fn gint5_matches_the_capture() {
