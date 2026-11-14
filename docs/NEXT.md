@@ -277,3 +277,15 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Evidence: GUI regression test in `src/ui.rs`; this does not replace
       the outstanding real-fork run of the four tabs.
 - [ ] Later: the macOS polish (owner's polishing phase).
+
+## NPC Control readback follow-up
+
+- [x] Decode doubled backslashes in quoted text and retain trailing empty
+      fields (#56/#57). Decoder and NPC/class reply regressions cover quotes,
+      backslashes and internal/trailing empty lines. Empty input still has no
+      fields; saving still omits one final line feed, separately from decoding.
+- [ ] Real-fork GUI acceptance remains outstanding (#27), including reopening,
+      editing and saving scripts after reconnect or target switches. This parser
+      repair does not add correlated save acceptance: transport success and
+      chat/list notifications do not establish accepted content. A same-target
+      GET observes content at that instant, not persistence across restart.
