@@ -15,7 +15,7 @@ listserver.rs  RC list from the listserver: handshake, account, server picking
 link.rs        one TCP link: frame codec (Plain / Gen5), send, recv with a deadline
 wire.rs        GCHAR / GSTRING encoders, Latin-1 text
    │
-seihai-core    (squirelworks/seihai, git tag) gen-5 cipher, zlib/bz2, message
+seihai-core    (squirelworks/seihai-core, git tag) gen-5 cipher, zlib/bz2, message
                splitting, GSHORT, list parsing
 ```
 
@@ -28,7 +28,8 @@ Rules for the layers:
   `parse_addplayer`, ...) so they can be unit-tested with exact bytes.
 - Where `seihai-core` already has a decoder, use it. When a new shared piece is
   needed by both the client and the RC (for example a prop table), add it to
-  `seihai-core` in the `seihai` repo, tag a release there, then bump the tag here.
+  the separate `squirelworks/seihai-core` repo, release a tag through its owner,
+  then update the dependency here. `Cargo.toml` records the current tag.
 
 ## Session model
 
@@ -41,7 +42,7 @@ The desktop window (egui, `src/ui.rs`) needs a live session.
 `live::LiveSession` runs the `Session` on its own thread, sends `Update`s
 (events, sent notes, errors, props, close) to the UI over a channel and takes
 `Command`s (chat, PM, admin messages, kick, warp, props, accounts, files,
-NPC-server discovery, quit) from another. `live_nc::LiveNc` does the same
+server settings, NPC-server discovery, quit) from another. `live_nc::LiveNc` does the same
 for the NPC-Control socket, with `NcView` as its state.
 `live::RcView` is the state the window draws, built only from `Update`s, so
 it is tested without egui. No async runtime is needed for one link; do not
@@ -52,10 +53,10 @@ add tokio unless a feature needs many links.
 | Feature (PLAN.md) | Code | Command line |
 |---|---|---|
 | 2. Players: PM, message all, warp, disconnect, props, rights, ban | `src/players.rs` (builders + parsers), events in `rc::Event` | `seihai-rc players pm/warp/kick/props/rights/ban` |
-| 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/get/set/add/delete` |
-| 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc options get/set`, `seihai-rc files ls/get/put` (planned; the file link is a library API so far) |
+| 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/get/set/add/delete/reset` |
+| 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc server options/folders/flags [--set-file PATH]`, `seihai-rc files ls/get/put/mv/rename/rm/rmdir` |
 | 5. NPC Control | `src/nc.rs` for the type-3 socket; discovery (ids 94 and 79) in `src/rc.rs` | `seihai-rc nc discover`, `nc npcs`, `nc npc`, `nc classes`, `nc class`, `nc weapons`, `nc weapon` |
-| Window | `src/ui.rs` behind the `gui` cargo feature, so the CLI builds without egui; the session thread and view state in `src/live.rs` (always built) | `seihai-rc gui` |
+| Window | `src/ui.rs` behind the `gui` cargo feature, so the CLI builds without egui; RC and NPC Control workers/view state in `src/live.rs` and `src/live_nc.rs` | `seihai-rc gui` (Players, Accounts, Files, NPC Control and Server tabs) |
 
 Each new message:
 
@@ -81,5 +82,12 @@ lines end up in shell history and process lists.
 - Unit tests next to the code: exact bytes for every builder and parser.
 - `tests/fake_servers.rs`: small fake gserver and listserver on ephemeral
   `127.0.0.1` ports. They must stay independent of the fork's code.
-- Later: CI against `seihai-gserver` (the Rust gserver) once its RC endpoint
-  (its stage 4) exists. Until then the fork is checked by hand in the lab.
+- `tests/real_listserver.rs`: starts the real `seihai-listserver` dev-dependency
+  on loopback and checks RC lists and password refusal. Its pin is in `Cargo.toml`.
+- `tests/live_session.rs` and `tests/window_tabs.rs`: exercise GUI workers and
+  view state against fake peers; they do not drive the window's selection and
+  confirmation controls or establish real-fork GUI acceptance.
+- The fork's dated CLI/protocol lab receipts live in `docs/lab/`. The #49
+  window smoke test covers login and the player list, not all four #50 tabs.
+  Track four-tab runtime acceptance and macOS validation separately in
+  [roadmap #27](https://github.com/squirelworks/seihai-rc/issues/27).
