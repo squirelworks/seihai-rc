@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use eframe::egui;
 
 use crate::accounts::Account;
-use crate::live::{warp_command, Command, LiveSession, LoginForm, RcView, Status};
+use crate::live::{warp_command, Command, LiveSession, LoginForm, RcView, ServerKind, Status};
 use crate::live_nc::{LiveNc, NcCommand, NcView, ScriptTarget};
 
 /// How often the window looks for updates when nothing else repaints it.
@@ -57,6 +57,29 @@ enum Tab {
     Accounts,
     Files,
     Nc,
+    Server,
+}
+
+struct ServerTab {
+    kind: ServerKind,
+    text: String,
+    /// The lines the editor was last filled from, per kind.
+    loaded: std::collections::HashMap<ServerKind, Vec<String>>,
+    /// Kinds already asked for once on opening.
+    asked: std::collections::HashSet<ServerKind>,
+    save_armed: bool,
+}
+
+impl Default for ServerTab {
+    fn default() -> Self {
+        Self {
+            kind: ServerKind::Options,
+            text: String::new(),
+            loaded: Default::default(),
+            asked: Default::default(),
+            save_armed: false,
+        }
+    }
 }
 
 struct AccountsTab {
@@ -116,6 +139,7 @@ struct App {
     accounts: AccountsTab,
     files: FilesTab,
     nc: NcTab,
+    server: ServerTab,
     form: LoginForm,
     form_error: Option<String>,
     live: Option<LiveSession>,
@@ -132,6 +156,7 @@ impl App {
             accounts: AccountsTab::default(),
             files: FilesTab::default(),
             nc: NcTab::default(),
+            server: ServerTab::default(),
             form,
             form_error: None,
             live: None,
@@ -377,6 +402,7 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.tab, Tab::Accounts, "Accounts");
                     ui.selectable_value(&mut self.tab, Tab::Files, "Files");
                     ui.selectable_value(&mut self.tab, Tab::Nc, "NPC Control");
+                    ui.selectable_value(&mut self.tab, Tab::Server, "Server");
                     ui.separator();
                 }
                 ui.checkbox(&mut self.view.verbose, "Show other ids");
@@ -402,6 +428,7 @@ impl eframe::App for App {
             egui::CentralPanel::default().show(ui, |ui| match self.tab {
                 Tab::Accounts => self.accounts_tab(ui),
                 Tab::Files => self.files_tab(ui),
+                Tab::Server => self.server_tab(ui),
                 _ => self.nc_tab(ui),
             });
         } else {
@@ -481,6 +508,13 @@ impl App {
             self.nc.target = Some(target.clone());
             self.nc.text = text.clone();
             self.nc.loaded = Some((target, text));
+        }
+        let kind = self.server.kind;
+        if let Some(lines) = self.view.server.get(&kind) {
+            if self.server.loaded.get(&kind) != Some(lines) {
+                self.server.text = lines.join("\n");
+                self.server.loaded.insert(kind, lines.clone());
+            }
         }
         if self.nc.addr.is_empty() {
             if let Some(a) = self.view.npc_servers.first() {
@@ -874,6 +908,61 @@ impl App {
                         .code_editor()
                         .desired_width(f32::INFINITY)
                         .desired_rows(20),
+                );
+            });
+    }
+
+    fn server_tab(&mut self, ui: &mut egui::Ui) {
+        let open = self.server.kind;
+        if !self.view.server.contains_key(&open) && self.server.asked.insert(open) {
+            self.send(Command::ServerGet(open));
+        }
+        ui.horizontal(|ui| {
+            for kind in [ServerKind::Options, ServerKind::Folders, ServerKind::Flags] {
+                if ui
+                    .selectable_label(self.server.kind == kind, kind.name())
+                    .clicked()
+                    && self.server.kind != kind
+                {
+                    self.server.kind = kind;
+                    self.server.save_armed = false;
+                    self.server.text = self
+                        .view
+                        .server
+                        .get(&kind)
+                        .map(|l| l.join("\n"))
+                        .unwrap_or_default();
+                }
+            }
+            ui.separator();
+            let kind = self.server.kind;
+            if ui.button("Read").clicked() {
+                self.server.loaded.remove(&kind);
+                self.send(Command::ServerGet(kind));
+            }
+            if confirm_button(ui, &mut self.server.save_armed, "Save") {
+                let text = self.server.text.clone();
+                self.view.expect_server_set(kind, &text);
+                self.server.loaded.remove(&kind);
+                self.send(Command::ServerSet(kind, text));
+            }
+            if let Some(lines) = self.view.server.get(&kind) {
+                ui.label(format!("{} line(s) on the server", lines.len()));
+            }
+        });
+        ui.label(match self.server.kind {
+            ServerKind::Flags => "One flag per line, name=value. Save replaces them all.",
+            _ => "One item per line. Save replaces the whole text and reads it back.",
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("servertext")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.server.text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(24),
                 );
             });
     }

@@ -27,6 +27,9 @@ use crate::rc::{
     is_npc_server_player, npc_server_query, parse_npc_endpoint, Event, LoginParams, PlayerEntry,
     PlayerList, Session,
 };
+use crate::server::{
+    flags_get, flags_set, normalized, parse_flags, parse_text, plo as server_plo, ServerText,
+};
 
 /// How long the worker waits for an event before it looks for commands.
 const POLL: Duration = Duration::from_millis(50);
@@ -75,8 +78,47 @@ pub enum Command {
     /// Ask every `(Server)` player where its NPC-server listens (94); the
     /// answers come as [`Update::NpcServer`].
     FindNpcServer,
+    /// Read the server options, folder config or flags.
+    ServerGet(ServerKind),
+    /// Replace them with these lines (52, 54 or 69), then read them back.
+    ServerSet(ServerKind, String),
     /// Log out and end the worker.
     Quit,
+}
+
+/// The three server texts an RC edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServerKind {
+    Options,
+    Folders,
+    Flags,
+}
+
+impl ServerKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ServerKind::Options => "server options",
+            ServerKind::Folders => "folder config",
+            ServerKind::Flags => "server flags",
+        }
+    }
+
+    fn get(self) -> Vec<u8> {
+        match self {
+            ServerKind::Options => ServerText::Options.get_message(),
+            ServerKind::Folders => ServerText::Folders.get_message(),
+            ServerKind::Flags => flags_get(),
+        }
+    }
+
+    fn set(self, text: &str) -> Result<Vec<u8>, String> {
+        let text = text.trim_end_matches(['\n', '\r']);
+        match self {
+            ServerKind::Options => Ok(ServerText::Options.set_message(text)),
+            ServerKind::Folders => Ok(ServerText::Folders.set_message(text)),
+            ServerKind::Flags => flags_set(&text.lines().map(str::to_string).collect::<Vec<_>>()),
+        }
+    }
 }
 
 /// Something the worker tells the window.
@@ -102,6 +144,11 @@ pub enum Update {
     Dir { dir: String, names: Vec<String> },
     /// A file's bytes.
     File { path: String, data: Vec<u8> },
+    /// Server options, folder config or flags as read, one per line.
+    ServerText {
+        kind: ServerKind,
+        lines: Vec<String>,
+    },
     /// An NPC-server address, `HOST:PORT`, from a 79 that parsed.
     NpcServer(String),
     /// The link is closed; the worker has ended.
@@ -206,6 +253,10 @@ pub fn encode(c: &Command) -> Option<Result<(Vec<u8>, String), String>> {
         Command::AccountDelete(name) => account_delete(name)
             .map(|m| (m, format!("deleted account {name}")))
             .map_err(|e| e.to_string()),
+        Command::ServerGet(kind) => Ok((kind.get(), String::new())),
+        Command::ServerSet(kind, text) => kind
+            .set(text)
+            .map(|m| (m, format!("sent the {}", kind.name()))),
         // Files and discovery run several steps in the worker.
         Command::FilesList(_)
         | Command::FileGet(_)
@@ -283,6 +334,27 @@ fn run(
                         match parse_account(p) {
                             Some(a) => Update::Account(a),
                             None => Update::Error("could not read the account".into()),
+                        }
+                    }
+                    Event::Other(id, p) if *id == server_plo::RC_SERVEROPTIONSGET => {
+                        Update::ServerText {
+                            kind: ServerKind::Options,
+                            lines: parse_text(p),
+                        }
+                    }
+                    Event::Other(id, p) if *id == server_plo::RC_FOLDERCONFIGGET => {
+                        Update::ServerText {
+                            kind: ServerKind::Folders,
+                            lines: parse_text(p),
+                        }
+                    }
+                    Event::Other(id, p) if *id == server_plo::RC_SERVERFLAGSGET => {
+                        match parse_flags(p) {
+                            Some(lines) => Update::ServerText {
+                                kind: ServerKind::Flags,
+                                lines,
+                            },
+                            None => Update::Error("could not read the server flags".into()),
                         }
                     }
                     Event::NpcServerAddr(a) => {
@@ -386,6 +458,7 @@ fn execute(s: &mut Session, c: Command, timeout: Duration, updates: &Sender<Upda
             let after = match &other {
                 Command::AccountSet(a) => account_get(&a.account).ok(),
                 Command::AccountDelete(_) => account_list("%", "").ok(),
+                Command::ServerSet(kind, _) => Some(kind.get()),
                 _ => None,
             };
             match encode(&other) {
@@ -469,6 +542,17 @@ pub struct RcView {
     pub file: Option<(String, Vec<u8>)>,
     /// NPC-server addresses found on this server.
     pub npc_servers: Vec<String>,
+    /// The server texts as last read.
+    pub server: std::collections::HashMap<ServerKind, Vec<String>>,
+    /// A set waiting for its read-back: what was sent.
+    pub server_sent: Option<(ServerKind, Vec<String>)>,
+}
+
+impl RcView {
+    /// Note a set, so the read-back that follows is compared with it.
+    pub fn expect_server_set(&mut self, kind: ServerKind, text: &str) {
+        self.server_sent = Some((kind, text.lines().map(str::to_string).collect()));
+    }
 }
 
 impl RcView {
@@ -503,6 +587,23 @@ impl RcView {
             Update::File { path, data } => {
                 self.push(format!("[file] {path}: {} bytes", data.len()));
                 self.file = Some((path, data));
+            }
+            Update::ServerText { kind, lines } => {
+                if let Some((want_kind, want)) = self.server_sent.take() {
+                    if want_kind == kind {
+                        self.push(if normalized(&lines) == normalized(&want) {
+                            format!("[saved] the {} read back as sent", kind.name())
+                        } else {
+                            format!(
+                                "[error] the server kept other {} than were sent",
+                                kind.name()
+                            )
+                        });
+                    } else {
+                        self.server_sent = Some((want_kind, want));
+                    }
+                }
+                self.server.insert(kind, lines);
             }
             Update::NpcServer(addr) => {
                 // The event line already shows the address as sent.
@@ -613,6 +714,27 @@ mod tests {
         v.apply(Update::Closed("logged out".into()));
         assert!(v.players.players.is_empty());
         assert_eq!(v.status, Status::Closed("logged out".into()));
+    }
+
+    #[test]
+    fn server_set_is_compared_with_the_read_back() {
+        let mut v = RcView::default();
+        v.expect_server_set(ServerKind::Flags, "a=1\nb=2\n");
+        v.apply(Update::ServerText {
+            kind: ServerKind::Flags,
+            lines: vec!["a=1".into(), "b=2".into()],
+        });
+        assert_eq!(v.log, vec!["[saved] the server flags read back as sent"]);
+        v.expect_server_set(ServerKind::Options, "name = x");
+        v.apply(Update::ServerText {
+            kind: ServerKind::Options,
+            lines: vec!["name = y".into()],
+        });
+        assert_eq!(
+            v.log[1],
+            "[error] the server kept other server options than were sent"
+        );
+        assert_eq!(v.server[&ServerKind::Options], vec!["name = y"]);
     }
 
     #[test]

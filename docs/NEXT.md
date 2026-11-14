@@ -261,6 +261,9 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       `src/live_nc.rs`, `tests/window_tabs.rs` (fake gserver and fake
       NPC-server: every command's ids on the wire), and screenshots of
       each tab under Xvfb against loopback stand-ins.
-- [ ] Later: server options, folder config and flags in the window (on
-      the command line now), and the macOS polish (owner's polishing
-      phase).
+- [x] Server tab: server options (51 → 76, set 52), folder config
+      (53 → 77, set 54) and flags (68 → 61, set 69). Opens with a read;
+      Save needs a second click, then reads back and logs whether the
+      server kept what was sent. Evidence:
+      `tests/window_tabs.rs::server_tab_reads_and_saves_options_and_flags`.
+- [ ] Later: the macOS polish (owner's polishing phase).

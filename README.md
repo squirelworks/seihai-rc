@@ -120,10 +120,11 @@ disconnect (click twice). The bar under the chat sends an RC chat line or
 an admin message to everyone. Tabs beside Players: **Accounts** (list,
 read, edit, delete), **Files** (list a folder, download, upload, rename,
 delete) and **NPC Control** (find the NPC-server, then NPCs, classes and
-weapons with a script editor). Deletes need a second click. The sessions
+weapons with a script editor) and **Server** (server options, folder
+config and flags: read, edit, save and read back). Deletes and server
+saves need a second click. The sessions
 run on their own threads (`src/live.rs`, `src/live_nc.rs`), so the window
-never waits on the network. Server options, folder config and flags stay
-on the command line for now.
+never waits on the network.
 The window needs Rust 1.95 or newer to build (egui 0.37); the command line
 builds on older toolchains. Linux needs X11 or Wayland and OpenGL at run time.
 

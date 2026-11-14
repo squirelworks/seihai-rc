@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use seihai_core::protocol::{read_gint3, split_messages, zlib_decompress, Message};
 use seihai_rc::accounts::Account;
 use seihai_rc::link::Codec;
-use seihai_rc::live::{Command, LiveSession, RcView};
+use seihai_rc::live::{Command, LiveSession, RcView, ServerKind};
 use seihai_rc::live_nc::{LiveNc, NcCommand, NcView, ScriptTarget};
 use seihai_rc::rc::{LoginParams, RcKind};
 use seihai_rc::wire::{gchar, message, push_gint3, push_gint5, push_gshort, push_gstring, text};
@@ -137,6 +137,8 @@ fn fake_gserver() -> (String, thread::JoinHandle<GameSeen>) {
             ..Default::default()
         };
         let mut files: Vec<String> = vec!["a.nw".into(), "b.txt".into()];
+        let mut options: Vec<u8> = b"\"name = Lab\",\"staff = labrc\"".to_vec();
+        let mut flags: Vec<Vec<u8>> = vec![b"lab=1".to_vec()];
         while let Some(frame) = read_frame(&mut s) {
             let body = codec.decode(&frame).unwrap();
             if body.first().map(|b| b.wrapping_sub(0x20)) == Some(50) {
@@ -217,6 +219,33 @@ fn fake_gserver() -> (String, thread::JoinHandle<GameSeen>) {
                             }
                         }
                         seen.renamed = Some((old, new));
+                        vec![]
+                    }
+                    51 => vec![message(76, &options)],
+                    52 => {
+                        options = m.payload.clone();
+                        vec![]
+                    }
+                    68 => {
+                        let mut p = Vec::new();
+                        push_gshort(&mut p, flags.len() as u16);
+                        for f in &flags {
+                            push_gstring(&mut p, f);
+                        }
+                        vec![message(61, &p)]
+                    }
+                    69 => {
+                        let n = usize::from(m.payload[0] - 0x20) << 7
+                            | usize::from(m.payload[1] - 0x20);
+                        let mut i = 2;
+                        flags = (0..n)
+                            .map(|_| {
+                                let len = usize::from(m.payload[i] - 0x20);
+                                let f = m.payload[i + 1..i + 1 + len].to_vec();
+                                i += 1 + len;
+                                f
+                            })
+                            .collect();
                         vec![]
                     }
                     94 => {
@@ -510,4 +539,44 @@ fn nc_tab_lists_opens_and_saves() {
     let seen = h.join().unwrap();
     let ids: Vec<u8> = seen.iter().map(|m| m.id).collect();
     assert_eq!(ids, vec![115, 116, 106, 109, 117, 115]);
+}
+
+#[test]
+fn server_tab_reads_and_saves_options_and_flags() {
+    let (addr, h) = fake_gserver();
+    let live = LiveSession::start(addr, params(), TIMEOUT);
+    let mut view = RcView::default();
+    pump(&live, &mut view, |v| v.players.players.len() == 2);
+
+    live.send(Command::ServerGet(ServerKind::Options));
+    pump(&live, &mut view, |v| {
+        v.server.contains_key(&ServerKind::Options)
+    });
+    assert_eq!(
+        view.server[&ServerKind::Options],
+        vec!["name = Lab", "staff = labrc"]
+    );
+
+    let text = "name = Lab\nstaff = labrc\nrclive = 1";
+    view.expect_server_set(ServerKind::Options, text);
+    live.send(Command::ServerSet(ServerKind::Options, text.into()));
+    pump(&live, &mut view, |v| v.server_sent.is_none());
+    assert!(view
+        .log
+        .iter()
+        .any(|l| l == "[saved] the server options read back as sent"));
+    assert_eq!(view.server[&ServerKind::Options].len(), 3);
+
+    let flags = "lab=1\nquest=done\n";
+    view.expect_server_set(ServerKind::Flags, flags);
+    live.send(Command::ServerSet(ServerKind::Flags, flags.into()));
+    pump(&live, &mut view, |v| v.server_sent.is_none());
+    assert_eq!(view.server[&ServerKind::Flags], vec!["lab=1", "quest=done"]);
+    assert!(view
+        .log
+        .iter()
+        .any(|l| l == "[saved] the server flags read back as sent"));
+
+    drop(live);
+    assert_eq!(h.join().unwrap().ids, vec![2, 51, 52, 51, 69, 68]);
 }
