@@ -266,4 +266,9 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Save needs a second click, then reads back and logs whether the
       server kept what was sent. Evidence:
       `tests/window_tabs.rs::server_tab_reads_and_saves_options_and_flags`.
+- [x] Starting another login clears the previous server's account and file
+      forms, pending download, NPC-Control connection and editor, server
+      read cache, and armed actions. Each new server is read afresh.
+      Evidence: GUI regression test in `src/ui.rs`; this does not replace
+      the outstanding real-fork run of the four tabs.
 - [ ] Later: the macOS polish (owner's polishing phase).
