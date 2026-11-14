@@ -1,6 +1,6 @@
 # seihai-rc against the fork: the last checks for #26, 2026-11-14
 
-Loopback only, on the lab host GwenTea2. It has no Linux lab VM, so every
+Loopback only, on the lab host. It has no Linux lab VM, so every
 program ran inside one `bwrap` network namespace that has only `lo`. No VM
 was booted, nothing ran on the desktop and no public server was contacted.
 The window ran under Xvfb. The setup is the one in
