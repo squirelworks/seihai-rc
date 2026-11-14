@@ -24,3 +24,4 @@ jobs:
       # The window (egui) builds only with the gui feature.
       - run: cargo clippy --all-targets --features gui -- -D warnings
       - run: cargo test
+      - run: cargo test --features gui --lib ui::tests
