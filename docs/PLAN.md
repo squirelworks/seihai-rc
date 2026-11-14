@@ -22,23 +22,38 @@ protocol facts are in the project files `remotecontrol-lineage.md` and
 
 1. **Done (command line, 2026-10-31).** Connect (listserver RC list or direct
    host and port), log in, show server messages and the RC chat, list players.
-2. **Mostly done (command line, 2026-11-04).** Players: list, private message,
-   message all, warp, disconnect, edit props and rights, local ban. This is
-   v0.1.0. List RCs moved to v0.2.0; it comes from the player list (an RC
-   is a player with an empty level), since id 65 is never sent. More prop
-   names are still open.
-3. **Mostly done (command line, 2026-11-04).** Accounts: list with a filter,
-   add, edit, delete. The byte before the ban reason in 73 is still open.
-4. Server options, folder config, server flags, file browser with upload and
-   download. The file link (list, get, put) is in as a library API; the rest
-   is not started.
-5. **Mostly done (command line, 2026-11-01).** NPC Control: NPC list, edit
-   script, add/delete NPC, classes, weapons, levels. Login, discovery and
-   NPC, class and weapon list / get / set / delete are in. Levels are not.
+2. **Implemented (command line).** Players: list, private message, admin
+   messages, warp, disconnect, edit props and rights, comments and local ban.
+   More prop names, flags and weapons are implemented in #47; chests in #45.
+   `rcs list` uses the player list (an RC has an empty level), not id 65.
+3. **Implemented (command line).** Accounts: list with a filter, get, add,
+   edit, delete and reset. The byte before the ban reason in 73 is the
+   GSTRING ban length, confirmed by the archived-RC captures in #45.
+4. **Implemented (command line and library).** Server options, folder config
+   and flags (#34); file list/get/put/move/rename/delete/folder-delete (#33),
+   including large transfers (#41, with real-RC captures in #45).
+5. **Partly implemented (command line).** NPC Control: login, discovery,
+   NPC/class/weapon list/get/set/delete, plus NPC add/reset/warp/flags.
+   Levels remain outside the implemented command set.
 
-Each feature: a command-line form first (`seihai-rc players list --server ...`),
-tested in CI against `seihai-gserver` and in the lab against the fork, then the
-window.
+## Window and validation
+
+The window is implemented behind `--features gui`: #48 provides login,
+players, chat and player actions; #50 adds Accounts, Files, NPC Control and
+Server tabs. See [ARCHITECTURE.md](ARCHITECTURE.md) for the worker model.
+
+Historical CLI/protocol fork checks and the window's login/player-list smoke
+test are recorded in [the 2026-11-14 lab pass](lab/2026-11-14-fork-lab-pass.md)
+(#49, closing #26). These do not establish real-fork acceptance of the four
+new #50 tabs. That acceptance, macOS validation and polish remain outstanding
+in [roadmap #27](https://github.com/squirelworks/seihai-rc/issues/27).
+Reconnect isolation is tracked separately in #51/#52; NPC Control editor and
+delete-confirmation fixes are tracked in #53/#54. Their integration state must
+be checked on GitHub before treating them as part of `main`.
+
+New features follow a command-line form first
+(`seihai-rc players list --server ...`), with byte tests, loopback integration
+tests and recorded fork validation before window acceptance is claimed.
 
 ## Out of scope: Graal3D (February 2000)
 
