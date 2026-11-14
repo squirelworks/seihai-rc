@@ -14,8 +14,11 @@ pub mod accounts;
 pub mod files;
 pub mod link;
 pub mod listserver;
+pub mod live;
 pub mod nc;
 pub mod players;
 pub mod rc;
 pub mod server;
+#[cfg(feature = "gui")]
+pub mod ui;
 pub mod wire;

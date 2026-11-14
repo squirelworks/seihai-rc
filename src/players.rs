@@ -941,6 +941,87 @@ pub fn props_set(from: &PropsReply, edits: &[(u8, Vec<u8>)]) -> Result<Vec<u8>, 
     Ok(message(pli::RC_PLAYERPROPSSET2, &payload))
 }
 
+/// A prop value for people: text when the bytes are a GSTRING that fills
+/// the value, a number for one byte or a GINT3, `power image`, colors as
+/// `a:b:c:d:e`, and escaped bytes otherwise.
+pub fn prop_value(id: u8, raw: &[u8]) -> String {
+    if let Some((power, image)) = power_and_image(id, raw) {
+        return if image.is_empty() {
+            power.to_string()
+        } else {
+            format!("{power} {image}")
+        };
+    }
+    if id == 11 {
+        if let Some(image) = head_image(raw) {
+            return image;
+        }
+    }
+    if id == 13 && raw.len() == 5 {
+        let c: Vec<String> = raw
+            .iter()
+            .map(|b| b.wrapping_sub(0x20).to_string())
+            .collect();
+        return c.join(":");
+    }
+    let n = |b: &u8| u32::from(b.wrapping_sub(0x20) & 0x7F);
+    let gstring = raw.len() > 1 && usize::from(raw[0].wrapping_sub(0x20)) == raw.len() - 1;
+    match raw {
+        [b] => n(b).to_string(),
+        [a, b, c] if !gstring || matches!(id, 3 | 27 | 28 | 29 | 36) => {
+            ((n(a) << 14) | (n(b) << 7) | n(c)).to_string()
+        }
+        _ if gstring => crate::wire::text(&raw[1..]),
+        _ => raw
+            .iter()
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    (b as char).to_string()
+                } else {
+                    format!("\\x{b:02x}")
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The `players props` text for a reply, one line each.
+pub fn props_lines(r: &PropsReply) -> Vec<String> {
+    let mut out = Vec::new();
+    if r.id == 0 {
+        out.push(format!(
+            "account {} world {} (not online)",
+            r.account, r.world
+        ));
+    } else {
+        out.push(format!(
+            "player {} account {} world {}",
+            r.id, r.account, r.world
+        ));
+    }
+    for p in &r.props {
+        out.push(format!(
+            "{:>4}  {:<20}  {}",
+            p.id,
+            prop_name(p.id).unwrap_or("?"),
+            prop_value(p.id, &p.raw)
+        ));
+    }
+    if !r.props_complete {
+        out.push("(the props block holds more than the prop table could read)".into());
+    }
+    out.push(format!("flags: {}", r.flags.len()));
+    for f in &r.flags {
+        out.push(format!("  {f}"));
+    }
+    out.push(format!("opened chests: {}", r.chests.len()));
+    for c in &r.chests {
+        out.push(format!("  {},{} {}", c.x, c.y, c.level));
+    }
+    out.push(format!("weapons: {}", r.weapons.join(", ")));
+    out
+}
+
 /// A short name for the player prop ids seen in the 2026-11-04 capture.
 pub fn prop_name(id: u8) -> Option<&'static str> {
     Some(match id {
