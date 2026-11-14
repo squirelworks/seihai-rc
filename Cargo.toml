@@ -16,6 +16,8 @@ name = "seihai-rc"
 path = "src/main.rs"
 
 [dependencies]
+# The window (`seihai-rc gui`), only with `--features gui`. MIT OR Apache-2.0.
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 # Protocol, framing, version profiles and scripting shared with the Seihai client.
 seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.1.0", default-features = false }
 
@@ -27,3 +29,7 @@ seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver",
 # very slow unoptimised.
 [profile.dev.package.argon2]
 opt-level = 3
+
+[features]
+# The egui window: `cargo build --features gui`, then `seihai-rc gui`.
+gui = ["dep:eframe"]

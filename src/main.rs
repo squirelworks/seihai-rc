@@ -11,6 +11,7 @@ use seihai_rc::files::{
     delete_message, folder_delete_message, move_message, rename_message, split_path, FileError,
 };
 use seihai_rc::listserver::{decode_server_key, fetch_rc_list, fetch_rc_list_secure, pick};
+use seihai_rc::live::{event_line, player_line};
 use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_add_message,
     npc_delete_message, npc_flags_get_message, npc_flags_set_message, npc_get_message,
@@ -22,8 +23,8 @@ use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, edit_flags,
     edit_weapons, parse_ban, parse_comments, parse_prop_edit, parse_props, parse_rights,
     plo as players_plo, private_admin_message, private_message, prop_name, props_get,
-    props_get_account, props_set, resolve, resolve_prop_edits, rights_get, rights_set, warp_player,
-    PropsReply, Rights,
+    props_get_account, props_lines, props_set, resolve, resolve_prop_edits, rights_get, rights_set,
+    warp_player, PropsReply, Rights,
 };
 use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
@@ -37,6 +38,9 @@ seihai-rc: Graal Remote Control client (stage 1, player actions, NPC Control)
 
 USAGE:
   seihai-rc servers --listserver HOST:PORT --account NAME [options]
+  seihai-rc gui [--server HOST:PORT] [--account NAME] [--nick NICK] [--rc classic]
+                    (a build with --features gui; logs in at once when the
+                    server, account and password variable are all given)
   seihai-rc login   (--server HOST:PORT | --listserver HOST:PORT --pick NAME|N)
                     --account NAME [--for SECS] [--say TEXT] [options]
   seihai-rc players list (--server ... | --listserver ... --pick ...)
@@ -440,41 +444,15 @@ fn login(o: &Opts, c: &Common) -> Result<(Session, String), String> {
     Ok((s, addr))
 }
 
-/// One `login` line for an arrival or a props refresh.
-fn player_line(tag: &str, e: &PlayerEntry) -> String {
-    format!(
-        "[{tag}] {} {} ({})",
-        e.id,
-        e.account,
-        if e.is_rc() { "RC" } else { e.level.as_str() }
-    )
-}
-
-fn hex_bytes(raw: &[u8]) -> String {
-    raw.iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn print_event(ev: &Event, verbose: bool) {
-    match ev {
-        Event::Signature => {}
-        Event::Disconnect(why) => println!("[disconnected] {why}"),
-        Event::RcChat(line) => println!("[rc] {line}"),
-        Event::AdminMessage(m) => println!("[admin] {}", m.replace('\u{a7}', ": ")),
-        Event::PrivateMessage { from, text } => println!("[pm from {from}] {text}"),
-        Event::AddPlayer(e) => println!("{}", player_line("online", e)),
-        Event::UpdatePlayer(e) => println!("{}", player_line("update", e)),
-        Event::DelPlayer(id) => println!("[offline] {id}"),
-        Event::OtherProps(id, _) if verbose => eprintln!("[id 8] props for unlisted {id}"),
-        Event::OtherProps(..) => {}
-        Event::NpcServerAddr(addr) => {
-            println!("[npc-server] {} {}", addr.player_id, addr.raw);
-        }
-        Event::PlayerFlags(raw) => println!("[player-flags] {}", hex_bytes(raw)),
-        Event::Other(id, p) if verbose => eprintln!("[id {id}] {} bytes", p.len()),
-        Event::Other(..) => {}
+    let Some(line) = event_line(ev, verbose) else {
+        return;
+    };
+    // The command line prints the -v-only lines to stderr.
+    if matches!(ev, Event::OtherProps(..) | Event::Other(..)) {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
     }
 }
 
@@ -523,6 +501,39 @@ fn cmd_servers(o: &Opts) -> Result<(), String> {
         println!("{}", s.display_line(i + 1).trim_start());
     }
     Ok(())
+}
+
+/// `seihai-rc gui`: the window, with the login form filled from the
+/// options and the password variable.
+#[cfg(feature = "gui")]
+fn cmd_gui(o: &Opts) -> Result<(), String> {
+    let var = o
+        .password_env
+        .clone()
+        .unwrap_or_else(|| "SEIHAI_RC_PASSWORD".into());
+    let mut form = seihai_rc::live::LoginForm {
+        password: std::env::var(&var).unwrap_or_default(),
+        classic: o.rc.as_deref() == Some("classic"),
+        ..Default::default()
+    };
+    if let Some(s) = &o.server {
+        form.server = s.clone();
+    }
+    if let Some(a) = &o.account {
+        form.account = a.clone();
+    }
+    if let Some(n) = &o.nick {
+        form.nickname = n.clone();
+    }
+    // With the server, the account and the password all given, log in
+    // at once; otherwise the form waits for the rest.
+    let now = o.server.is_some() && o.account.is_some() && !form.password.is_empty();
+    seihai_rc::ui::run(form, now)
+}
+
+#[cfg(not(feature = "gui"))]
+fn cmd_gui(_o: &Opts) -> Result<(), String> {
+    Err("this build has no window; build with `cargo build --features gui`".into())
 }
 
 fn cmd_login(o: &Opts) -> Result<(), String> {
@@ -1279,49 +1290,6 @@ fn cmd_players_rights(o: &Opts, account: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A prop value for people: text when the bytes are a GSTRING that fills
-/// the value, a number for one byte or a GINT3, and escaped bytes otherwise.
-fn prop_value(id: u8, raw: &[u8]) -> String {
-    if let Some((power, image)) = seihai_rc::players::power_and_image(id, raw) {
-        return if image.is_empty() {
-            power.to_string()
-        } else {
-            format!("{power} {image}")
-        };
-    }
-    if id == 11 {
-        if let Some(image) = seihai_rc::players::head_image(raw) {
-            return image;
-        }
-    }
-    if id == 13 && raw.len() == 5 {
-        let c: Vec<String> = raw
-            .iter()
-            .map(|b| b.wrapping_sub(0x20).to_string())
-            .collect();
-        return c.join(":");
-    }
-    let n = |b: &u8| u32::from(b.wrapping_sub(0x20) & 0x7F);
-    let gstring = raw.len() > 1 && usize::from(raw[0].wrapping_sub(0x20)) == raw.len() - 1;
-    match raw {
-        [b] => n(b).to_string(),
-        [a, b, c] if !gstring || matches!(id, 3 | 27 | 28 | 29 | 36) => {
-            ((n(a) << 14) | (n(b) << 7) | n(c)).to_string()
-        }
-        _ if gstring => seihai_rc::wire::text(&raw[1..]),
-        _ => raw
-            .iter()
-            .map(|&b| {
-                if (0x20..0x7f).contains(&b) {
-                    (b as char).to_string()
-                } else {
-                    format!("\\x{b:02x}")
-                }
-            })
-            .collect(),
-    }
-}
-
 /// Ask for the props of one player (73, by id) or of an account that is
 /// not online (74, by name), and wait for the 72 that answers it.
 fn read_props(s: &mut Session, c: &Common, target: &PropsTarget) -> Result<PropsReply, String> {
@@ -1359,31 +1327,9 @@ impl PropsTarget {
 }
 
 fn print_props(r: &PropsReply) {
-    if r.id == 0 {
-        println!("account {} world {} (not online)", r.account, r.world);
-    } else {
-        println!("player {} account {} world {}", r.id, r.account, r.world);
+    for line in props_lines(r) {
+        println!("{line}");
     }
-    for p in &r.props {
-        println!(
-            "{:>4}  {:<20}  {}",
-            p.id,
-            prop_name(p.id).unwrap_or("?"),
-            prop_value(p.id, &p.raw)
-        );
-    }
-    if !r.props_complete {
-        println!("(the props block holds more than the prop table could read)");
-    }
-    println!("flags: {}", r.flags.len());
-    for f in &r.flags {
-        println!("  {f}");
-    }
-    println!("opened chests: {}", r.chests.len());
-    for c in &r.chests {
-        println!("  {},{} {}", c.x, c.y, c.level);
-    }
-    println!("weapons: {}", r.weapons.join(", "));
 }
 
 fn cmd_players_props(o: &Opts, who: &str) -> Result<(), String> {
@@ -2342,6 +2288,7 @@ fn main() -> ExitCode {
     let result = match cmd.as_slice() {
         ["servers"] => cmd_servers(&o),
         ["login"] => cmd_login(&o),
+        ["gui"] => cmd_gui(&o),
         ["players", "list"] | ["players"] => cmd_players_list(&o),
         ["rcs", "list"] | ["rcs"] => cmd_rcs_list(&o),
         ["players", "pm", who, words @ ..] if !words.is_empty() => cmd_players_pm(&o, who, words),
@@ -2454,6 +2401,7 @@ mod tests {
 
     #[test]
     fn prop_values_read_as_text_or_numbers() {
+        use seihai_rc::players::prop_value;
         assert_eq!(prop_value(0, b"(Lab222rc"), "Lab222rc");
         assert_eq!(prop_value(3, b"  '"), "7");
         assert_eq!(prop_value(29, &[0x20, 0x23, 0x7b]), "475");

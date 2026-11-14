@@ -21,4 +21,6 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The window (egui) builds only with the gui feature.
+      - run: cargo clippy --all-targets --features gui -- -D warnings
       - run: cargo test

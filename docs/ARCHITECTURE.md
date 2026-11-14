@@ -37,10 +37,13 @@ until an event is ready or the deadline passes. Commands are short-lived
 (log in, do one thing, exit), which keeps the command-line tools simple and
 scriptable.
 
-The desktop window (later, egui) needs a live session. Plan: run the
-`Session` on its own thread, send `Event`s to the UI over a channel and take
-commands (`Command` enum: chat, PM, warp, ...) from another. No async runtime is
-needed for one link; do not add tokio unless a feature needs many links.
+The desktop window (egui, `src/ui.rs`) needs a live session.
+`live::LiveSession` runs the `Session` on its own thread, sends `Update`s
+(events, sent notes, errors, props, close) to the UI over a channel and takes
+`Command`s (chat, PM, admin messages, kick, warp, props, quit) from another.
+`live::RcView` is the state the window draws, built only from `Update`s, so
+it is tested without egui. No async runtime is needed for one link; do not
+add tokio unless a feature needs many links.
 
 ## Where new features go
 
@@ -50,7 +53,7 @@ needed for one link; do not add tokio unless a feature needs many links.
 | 3. Accounts | `src/accounts.rs` | `seihai-rc accounts list/get/set/add/delete` |
 | 4. Server options, folder config, flags, file browser | `src/server.rs`, `src/files.rs` | `seihai-rc options get/set`, `seihai-rc files ls/get/put` (planned; the file link is a library API so far) |
 | 5. NPC Control | `src/nc.rs` for the type-3 socket; discovery (ids 94 and 79) in `src/rc.rs` | `seihai-rc nc discover`, `nc npcs`, `nc npc`, `nc classes`, `nc class`, `nc weapons`, `nc weapon` |
-| Window | `src/ui/` behind a `gui` cargo feature, so the CLI builds without egui | `seihai-rc gui` |
+| Window | `src/ui.rs` behind the `gui` cargo feature, so the CLI builds without egui; the session thread and view state in `src/live.rs` (always built) | `seihai-rc gui` |
 
 Each new message:
 

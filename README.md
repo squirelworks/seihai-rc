@@ -12,7 +12,7 @@ Part of the Seihai server stack:
 [seihai-servertools](https://github.com/squirelworks/seihai-servertools) ·
 client: [seihai](https://github.com/squirelworks/seihai).
 
-**Status: command line.** Log in directly or through the listserver's RC
+**Status: command line, and a first window (`seihai-rc gui`, `--features gui`).** Log in directly or through the listserver's RC
 list, watch the RC chat (an empty keepalive, id 162, goes out once a minute
 so a quiet session is not dropped), list the players online, and send a private
 message, an admin message to everyone or to one player, a disconnect or
@@ -103,6 +103,24 @@ option. The account must be staff on the gserver and allowed from your IP.
 cargo build --release
 cargo test
 ```
+
+### The window
+
+```
+cargo build --release --features gui
+SEIHAI_RC_PASSWORD=... seihai-rc gui --server 127.0.0.1:14802 --account myrc
+```
+
+`seihai-rc gui` opens an egui window: a login form (filled from `--server`,
+`--account`, `--nick`, `--rc` and the password variable, and logged in at
+once when all of them are given), then the players and RCs online on the
+left, the RC chat and server messages in the middle, and on the right the
+selected player's actions: PM, admin message, warp, read props and
+disconnect (click twice). The bar under the chat sends an RC chat line or
+an admin message to everyone. The session runs on its own thread
+(`src/live.rs`), so the window never waits on the network. Accounts,
+files, server options and NPC Control stay on the command line for now.
+Linux needs X11 or Wayland and OpenGL at run time.
 
 The tests run the client against small fake servers on loopback. Lab runs
 against the gserver-v2 fork are recorded in [docs/lab](docs/lab).

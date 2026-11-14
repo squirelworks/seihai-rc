@@ -228,5 +228,16 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
 
 ## Window
 
-egui window behind a `gui` feature once stages 2 and 3 work on the command
-line. See `docs/ARCHITECTURE.md` for the threading plan.
+- [x] egui window behind the `gui` feature: `seihai-rc gui`. Login form,
+      players and RCs, RC chat, server messages, and per-player PM, admin
+      message, warp, props read and disconnect; admin message to all.
+      The session runs on a worker thread (`src/live.rs`: `LiveSession`
+      takes `Command`s and sends `Update`s; `RcView` is the state the
+      window draws). Evidence: unit tests in `src/live.rs`,
+      `tests/live_session.rs` (fake gserver, both login types: every
+      command's bytes, props, a closed link and a refused login), and a
+      screenshot under Xvfb against a loopback stand-in. CI builds and
+      lints it on Linux and Windows. Not yet driven against the fork.
+- [ ] Later, as the owner wants them: accounts, files, server options and
+      NPC Control in the window (they are on the command line), and the
+      macOS polish (owner's polishing phase).
