@@ -247,6 +247,23 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       lints it on Linux and Windows. Logged in to the fork and showed its
       players on 2026-11-14 (`docs/lab/2026-11-14-fork-lab-pass.md`).
       Needs rustc 1.95 (eframe 0.37); the command line builds on older.
-- [ ] Later, as the owner wants them: accounts, files, server options and
-      NPC Control in the window (they are on the command line), and the
-      macOS polish (owner's polishing phase).
+- [x] Accounts, Files and NPC Control tabs in the window. Accounts:
+      list with a pattern, read, edit (e-mail, banned, load only, admin
+      level, admin worlds, ban reason; saved with 78 and read back) and
+      delete (two clicks). Files: list a folder, download to a local
+      file, upload, rename and delete (two clicks), each listing the
+      folder first as the command line does. NPC Control: find the
+      NPC-server through the game server (94 → 79) or type its address,
+      then a second worker thread (`src/live_nc.rs`) logs in on the
+      type-3 socket; NPCs (attributes, script edit, reset, delete),
+      classes (open, new, save, delete) and weapons (open, new with an
+      image, save, delete). Evidence: unit tests in `src/live.rs` and
+      `src/live_nc.rs`, `tests/window_tabs.rs` (fake gserver and fake
+      NPC-server: every command's ids on the wire), and screenshots of
+      each tab under Xvfb against loopback stand-ins.
+- [x] Server tab: server options (51 → 76, set 52), folder config
+      (53 → 77, set 54) and flags (68 → 61, set 69). Opens with a read;
+      Save needs a second click, then reads back and logs whether the
+      server kept what was sent. Evidence:
+      `tests/window_tabs.rs::server_tab_reads_and_saves_options_and_flags`.
+- [ ] Later: the macOS polish (owner's polishing phase).

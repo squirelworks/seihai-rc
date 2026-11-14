@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use eframe::egui;
 
-use crate::live::{warp_command, Command, LiveSession, LoginForm, RcView, Status};
+use crate::accounts::Account;
+use crate::live::{warp_command, Command, LiveSession, LoginForm, RcView, ServerKind, Status};
+use crate::live_nc::{LiveNc, NcCommand, NcView, ScriptTarget};
 
 /// How often the window looks for updates when nothing else repaints it.
 const REFRESH: Duration = Duration::from_millis(100);
@@ -48,7 +50,96 @@ struct Actions {
     kick_armed: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Tab {
+    #[default]
+    Players,
+    Accounts,
+    Files,
+    Nc,
+    Server,
+}
+
+struct ServerTab {
+    kind: ServerKind,
+    text: String,
+    /// The lines the editor was last filled from, per kind.
+    loaded: std::collections::HashMap<ServerKind, Vec<String>>,
+    /// Kinds already asked for once on opening.
+    asked: std::collections::HashSet<ServerKind>,
+    save_armed: bool,
+}
+
+impl Default for ServerTab {
+    fn default() -> Self {
+        Self {
+            kind: ServerKind::Options,
+            text: String::new(),
+            loaded: Default::default(),
+            asked: Default::default(),
+            save_armed: false,
+        }
+    }
+}
+
+struct AccountsTab {
+    pattern: String,
+    selected: Option<String>,
+    /// The account the form was last filled from.
+    loaded: Option<Account>,
+    edit: Account,
+    level: String,
+    reason: String,
+    delete_armed: bool,
+}
+
+impl Default for AccountsTab {
+    fn default() -> Self {
+        Self {
+            pattern: "%".into(),
+            selected: None,
+            loaded: None,
+            edit: Account::default(),
+            level: String::new(),
+            reason: String::new(),
+            delete_armed: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct FilesTab {
+    dir: String,
+    selected: Option<String>,
+    local: String,
+    new_name: String,
+    /// A fetch waiting to be written to this local path.
+    save_to: Option<(String, String)>,
+    delete_armed: bool,
+}
+
+#[derive(Default)]
+struct NcTab {
+    addr: String,
+    live: Option<LiveNc>,
+    view: NcView,
+    /// What the editor is for, and its text.
+    target: Option<ScriptTarget>,
+    text: String,
+    image: String,
+    /// The script last loaded into the editor, to spot a new one.
+    loaded: Option<(ScriptTarget, String)>,
+    new_class: String,
+    new_weapon: String,
+    delete_armed: bool,
+}
+
 struct App {
+    tab: Tab,
+    accounts: AccountsTab,
+    files: FilesTab,
+    nc: NcTab,
+    server: ServerTab,
     form: LoginForm,
     form_error: Option<String>,
     live: Option<LiveSession>,
@@ -61,6 +152,11 @@ struct App {
 impl App {
     fn new(form: LoginForm) -> Self {
         Self {
+            tab: Tab::default(),
+            accounts: AccountsTab::default(),
+            files: FilesTab::default(),
+            nc: NcTab::default(),
+            server: ServerTab::default(),
             form,
             form_error: None,
             live: None,
@@ -272,6 +368,19 @@ impl eframe::App for App {
                 self.view.apply(u);
             }
         }
+        if let Some(live) = &self.nc.live {
+            for u in live.drain() {
+                let before = self.nc.view.log.len();
+                self.nc.view.apply(u);
+                // One log for every tab.
+                let new: Vec<String> = self.nc.view.log[before..].to_vec();
+                self.view.log.extend(new);
+            }
+        }
+        if self.nc.view.online.is_none() && self.nc.view.ended.is_some() {
+            self.nc.live = None;
+        }
+        self.after_updates();
         if matches!(self.view.status, Status::Failed(_) | Status::Closed(_)) {
             self.live = None;
         }
@@ -287,6 +396,15 @@ impl eframe::App for App {
                     Status::Closed(why) => format!("Closed: {why}"),
                 };
                 ui.label(text);
+                if online {
+                    ui.separator();
+                    ui.selectable_value(&mut self.tab, Tab::Players, "Players");
+                    ui.selectable_value(&mut self.tab, Tab::Accounts, "Accounts");
+                    ui.selectable_value(&mut self.tab, Tab::Files, "Files");
+                    ui.selectable_value(&mut self.tab, Tab::Nc, "NPC Control");
+                    ui.selectable_value(&mut self.tab, Tab::Server, "Server");
+                    ui.separator();
+                }
                 ui.checkbox(&mut self.view.verbose, "Show other ids");
                 if online && ui.button("Log out").clicked() {
                     self.send(Command::Quit);
@@ -303,6 +421,16 @@ impl eframe::App for App {
                     }
                 });
             }
+        } else if self.tab != Tab::Players {
+            egui::Panel::bottom("tablog")
+                .default_size(140.0)
+                .show(ui, |ui| self.log_pane(ui));
+            egui::CentralPanel::default().show(ui, |ui| match self.tab {
+                Tab::Accounts => self.accounts_tab(ui),
+                Tab::Files => self.files_tab(ui),
+                Tab::Server => self.server_tab(ui),
+                _ => self.nc_tab(ui),
+            });
         } else {
             egui::Panel::left("players")
                 .default_size(280.0)
@@ -325,5 +453,517 @@ impl eframe::App for App {
             });
         }
         ctx.request_repaint_after(REFRESH);
+    }
+}
+
+/// A button that needs two clicks: the first arms it.
+fn confirm_button(ui: &mut egui::Ui, armed: &mut bool, label: &str) -> bool {
+    let text = if *armed {
+        format!("Click again to {}", label.to_lowercase())
+    } else {
+        label.to_string()
+    };
+    if ui.button(text).clicked() {
+        if *armed {
+            *armed = false;
+            return true;
+        }
+        *armed = true;
+    }
+    false
+}
+
+impl App {
+    /// Fill forms from what arrived: an account read, a fetched file to
+    /// save, a script to edit, an NPC-server address.
+    fn after_updates(&mut self) {
+        if self.view.account.is_some() && self.view.account != self.accounts.loaded {
+            let a = self.view.account.clone().unwrap_or_default();
+            self.accounts.level = a.admin_level.to_string();
+            self.accounts.reason = a.ban_reason.join("\n");
+            self.accounts.edit = a.clone();
+            self.accounts.loaded = Some(a);
+        }
+        if let (Some((path, data)), Some((want, local))) = (&self.view.file, &self.files.save_to) {
+            if path == want {
+                let line = match std::fs::write(local, data) {
+                    Ok(()) => format!("[saved] {path} to {local} ({} bytes)", data.len()),
+                    Err(e) => format!("[error] could not write {local}: {e}"),
+                };
+                self.view.log.push(line);
+                self.files.save_to = None;
+                self.view.file = None;
+            }
+        }
+        if self.nc.view.script.is_some() && self.nc.view.script != self.nc.loaded {
+            let (target, text) = self
+                .nc
+                .view
+                .script
+                .clone()
+                .unwrap_or((ScriptTarget::Npc(0), String::new()));
+            if let ScriptTarget::Weapon { image, .. } = &target {
+                self.nc.image = image.clone();
+            }
+            self.nc.target = Some(target.clone());
+            self.nc.text = text.clone();
+            self.nc.loaded = Some((target, text));
+        }
+        let kind = self.server.kind;
+        if let Some(lines) = self.view.server.get(&kind) {
+            if self.server.loaded.get(&kind) != Some(lines) {
+                self.server.text = lines.join("\n");
+                self.server.loaded.insert(kind, lines.clone());
+            }
+        }
+        if self.nc.addr.is_empty() {
+            if let Some(a) = self.view.npc_servers.first() {
+                self.nc.addr = a.clone();
+            }
+        }
+    }
+
+    fn log_pane(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for line in self.view.log.iter().rev().take(200).rev() {
+                    ui.monospace(line);
+                }
+            });
+    }
+
+    fn accounts_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Name pattern (% matches any)");
+            ui.text_edit_singleline(&mut self.accounts.pattern);
+            if ui.button("List").clicked() {
+                let p = self.accounts.pattern.clone();
+                self.send(Command::AccountList(p));
+            }
+        });
+        ui.separator();
+        let names = self.view.accounts.clone();
+        ui.columns(2, |cols| {
+            egui::ScrollArea::vertical()
+                .id_salt("accounts")
+                .show(&mut cols[0], |ui| {
+                    for n in &names {
+                        let sel = self.accounts.selected.as_deref() == Some(n.as_str());
+                        if ui.selectable_label(sel, n).clicked() {
+                            self.accounts.selected = Some(n.clone());
+                            self.accounts.delete_armed = false;
+                            if let Some(live) = &self.live {
+                                live.send(Command::AccountGet(n.clone()));
+                            }
+                        }
+                    }
+                    if names.is_empty() {
+                        ui.label("Press List.");
+                    }
+                });
+            let ui = &mut cols[1];
+            let Some(sel) = self.accounts.selected.clone() else {
+                ui.label("Pick an account.");
+                return;
+            };
+            if self.accounts.loaded.as_ref().map(|a| a.account.as_str()) != Some(sel.as_str()) {
+                ui.label(format!("Reading {sel}…"));
+                return;
+            }
+            let a = &mut self.accounts.edit;
+            ui.heading(&a.account);
+            egui::Grid::new("account").num_columns(2).show(ui, |ui| {
+                ui.label("E-mail");
+                ui.text_edit_singleline(&mut a.email);
+                ui.end_row();
+                ui.label("Banned");
+                ui.checkbox(&mut a.banned, "");
+                ui.end_row();
+                ui.label("Ban length");
+                ui.label(if a.ban_length.is_empty() {
+                    "none"
+                } else {
+                    a.ban_length.as_str()
+                });
+                ui.end_row();
+                ui.label("Load only");
+                ui.checkbox(&mut a.load_only, "");
+                ui.end_row();
+                ui.label("Admin level");
+                ui.text_edit_singleline(&mut self.accounts.level);
+                ui.end_row();
+                ui.label("Admin worlds");
+                ui.text_edit_singleline(&mut a.admin_worlds);
+                ui.end_row();
+                ui.label("Ban reason");
+                ui.text_edit_multiline(&mut self.accounts.reason);
+                ui.end_row();
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    match self.accounts.level.trim().parse::<u8>() {
+                        Ok(level) => {
+                            let mut out = self.accounts.edit.clone();
+                            out.admin_level = level;
+                            out.ban_reason = self
+                                .accounts
+                                .reason
+                                .lines()
+                                .map(str::to_string)
+                                .filter(|l| !l.is_empty())
+                                .collect();
+                            if let Some(live) = &self.live {
+                                live.send(Command::AccountSet(out));
+                            }
+                        }
+                        Err(_) => self
+                            .view
+                            .log
+                            .push("[error] the admin level is a number".into()),
+                    }
+                }
+                if confirm_button(ui, &mut self.accounts.delete_armed, "Delete") {
+                    if let Some(live) = &self.live {
+                        live.send(Command::AccountDelete(sel.clone()));
+                    }
+                    self.accounts.selected = None;
+                }
+            });
+        });
+    }
+
+    fn files_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Folder");
+            ui.text_edit_singleline(&mut self.files.dir);
+            if ui.button("List").clicked() {
+                let d = self.files.dir.clone();
+                self.send(Command::FilesList(d));
+            }
+        });
+        ui.separator();
+        let listing = self.view.dir.clone();
+        ui.columns(2, |cols| {
+            egui::ScrollArea::vertical()
+                .id_salt("files")
+                .show(&mut cols[0], |ui| match &listing {
+                    Some((dir, names)) => {
+                        ui.label(format!("{dir} ({} files)", names.len()));
+                        for n in names {
+                            let path = format!("{dir}{n}");
+                            let sel = self.files.selected.as_deref() == Some(path.as_str());
+                            if ui.selectable_label(sel, n).clicked() {
+                                self.files.selected = Some(path);
+                                self.files.new_name = n.clone();
+                                self.files.delete_armed = false;
+                            }
+                        }
+                    }
+                    None => {
+                        ui.label("Press List.");
+                    }
+                });
+            let ui = &mut cols[1];
+            ui.label("Local file");
+            ui.text_edit_singleline(&mut self.files.local);
+            let local = self.files.local.trim().to_string();
+            if ui.button("Upload into this folder").clicked() {
+                let dir = listing.as_ref().map(|l| l.0.clone()).unwrap_or_default();
+                let name = std::path::Path::new(&local)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string());
+                match (std::fs::read(&local), name) {
+                    (Ok(data), Some(name)) => self.send(Command::FilePut {
+                        path: format!("{dir}{name}"),
+                        data,
+                    }),
+                    (Err(e), _) => self.view.log.push(format!("[error] {local}: {e}")),
+                    (_, None) => self.view.log.push("[error] give a local file".into()),
+                }
+            }
+            ui.separator();
+            let Some(path) = self.files.selected.clone() else {
+                ui.label("Pick a file.");
+                return;
+            };
+            ui.heading(&path);
+            if ui.button("Download to the local file").clicked() {
+                if local.is_empty() {
+                    self.view.log.push("[error] give a local file".into());
+                } else {
+                    self.files.save_to = Some((path.clone(), local.clone()));
+                    self.send(Command::FileGet(path.clone()));
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.files.new_name);
+                if ui.button("Rename").clicked() {
+                    let new_name = self.files.new_name.trim().to_string();
+                    if let Some(live) = &self.live {
+                        live.send(Command::FileRename {
+                            path: path.clone(),
+                            new_name,
+                        });
+                    }
+                    self.files.selected = None;
+                }
+            });
+            if confirm_button(ui, &mut self.files.delete_armed, "Delete") {
+                if let Some(live) = &self.live {
+                    live.send(Command::FileDelete(path));
+                }
+                self.files.selected = None;
+            }
+        });
+    }
+
+    fn nc_send(&mut self, c: NcCommand) {
+        if let Some(live) = &self.nc.live {
+            live.send(c);
+        }
+    }
+
+    fn nc_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("NPC-server (HOST:PORT)");
+            ui.text_edit_singleline(&mut self.nc.addr);
+            if ui.button("Find").clicked() {
+                self.send(Command::FindNpcServer);
+            }
+            match &self.nc.view.online {
+                Some(_) => {
+                    if ui.button("Disconnect").clicked() {
+                        self.nc_send(NcCommand::Quit);
+                    }
+                }
+                None => {
+                    if ui.button("Connect").clicked() && !self.nc.addr.trim().is_empty() {
+                        self.nc.view = NcView::default();
+                        self.nc.live = Some(LiveNc::start(
+                            self.nc.addr.trim().to_string(),
+                            self.form.account.trim().to_string(),
+                            self.form.password.clone(),
+                            Duration::from_secs(10),
+                        ));
+                    }
+                }
+            }
+        });
+        if self.nc.view.online.is_none() {
+            ui.label(match &self.nc.view.ended {
+                Some(why) => format!("Not connected: {why}"),
+                None => "Find the NPC-server (or type its address), then Connect.".into(),
+            });
+            return;
+        }
+        ui.separator();
+        let lists = self.nc.view.lists.clone();
+        egui::Panel::left("nclists")
+            .default_size(260.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("nclist")
+                    .show(ui, |ui| {
+                        egui::CollapsingHeader::new(format!("NPCs ({})", lists.npcs.len()))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for row in lists.npcs.values() {
+                                    let label = format!(
+                                        "{} {} ({})",
+                                        row.id,
+                                        row.name.as_deref().unwrap_or(""),
+                                        row.level.as_deref().unwrap_or("")
+                                    );
+                                    let sel = self.nc.target == Some(ScriptTarget::Npc(row.id));
+                                    if ui.selectable_label(sel, label).clicked() {
+                                        self.nc.target = Some(ScriptTarget::Npc(row.id));
+                                        self.nc.text.clear();
+                                        self.nc.view.attributes = None;
+                                        self.nc_send(NcCommand::NpcAttributes(row.id));
+                                        self.nc_send(NcCommand::NpcScript(row.id));
+                                    }
+                                }
+                            });
+                        egui::CollapsingHeader::new(format!("Classes ({})", lists.classes.len()))
+                            .show(ui, |ui| {
+                                for c in &lists.classes {
+                                    let sel =
+                                        self.nc.target == Some(ScriptTarget::Class(c.clone()));
+                                    if ui.selectable_label(sel, c).clicked() {
+                                        self.nc.target = Some(ScriptTarget::Class(c.clone()));
+                                        self.nc.text.clear();
+                                        self.nc_send(NcCommand::ClassGet(c.clone()));
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.text_edit_singleline(&mut self.nc.new_class);
+                                    if ui.button("New class").clicked() {
+                                        let n = self.nc.new_class.trim().to_string();
+                                        if !n.is_empty() {
+                                            self.nc.target = Some(ScriptTarget::Class(n));
+                                            self.nc.text.clear();
+                                        }
+                                    }
+                                });
+                            });
+                        egui::CollapsingHeader::new(format!("Weapons ({})", lists.weapons.len()))
+                            .show(ui, |ui| {
+                                for w in &lists.weapons {
+                                    let sel = matches!(&self.nc.target,
+                                    Some(ScriptTarget::Weapon { name, .. }) if name == w);
+                                    if ui.selectable_label(sel, w).clicked() {
+                                        self.nc.target = Some(ScriptTarget::Weapon {
+                                            name: w.clone(),
+                                            image: String::new(),
+                                        });
+                                        self.nc.text.clear();
+                                        self.nc_send(NcCommand::WeaponGet(w.clone()));
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.text_edit_singleline(&mut self.nc.new_weapon);
+                                    if ui.button("New weapon").clicked() {
+                                        let n = self.nc.new_weapon.trim().to_string();
+                                        if !n.is_empty() {
+                                            self.nc.target = Some(ScriptTarget::Weapon {
+                                                name: n,
+                                                image: String::new(),
+                                            });
+                                            self.nc.image.clear();
+                                            self.nc.text.clear();
+                                        }
+                                    }
+                                });
+                                if ui.button("Refresh weapons").clicked() {
+                                    self.nc_send(NcCommand::Weapons);
+                                }
+                            });
+                    });
+            });
+        let Some(target) = self.nc.target.clone() else {
+            ui.label("Pick an NPC, class or weapon.");
+            return;
+        };
+        ui.horizontal(|ui| match &target {
+            ScriptTarget::Npc(id) => {
+                ui.heading(format!("NPC {id}"));
+                if ui.button("Save script").clicked() {
+                    let script = self.nc.text.clone();
+                    self.nc_send(NcCommand::NpcScriptSet { id: *id, script });
+                }
+                if ui.button("Reset").clicked() {
+                    self.nc_send(NcCommand::NpcReset(*id));
+                }
+                if confirm_button(ui, &mut self.nc.delete_armed, "Delete") {
+                    self.nc_send(NcCommand::NpcDelete(*id));
+                    self.nc.target = None;
+                }
+            }
+            ScriptTarget::Class(name) => {
+                ui.heading(format!("Class {name}"));
+                if ui.button("Save").clicked() {
+                    let script = self.nc.text.clone();
+                    self.nc_send(NcCommand::ClassSet {
+                        name: name.clone(),
+                        script,
+                    });
+                }
+                if confirm_button(ui, &mut self.nc.delete_armed, "Delete") {
+                    self.nc_send(NcCommand::ClassDelete(name.clone()));
+                    self.nc.target = None;
+                }
+            }
+            ScriptTarget::Weapon { name, .. } => {
+                ui.heading(format!("Weapon {name}"));
+                ui.label("Image");
+                ui.add(egui::TextEdit::singleline(&mut self.nc.image).desired_width(120.0));
+                if ui.button("Save").clicked() {
+                    let script = self.nc.text.clone();
+                    let image = self.nc.image.clone();
+                    self.nc_send(NcCommand::WeaponSet {
+                        name: name.clone(),
+                        image,
+                        script,
+                    });
+                }
+                if confirm_button(ui, &mut self.nc.delete_armed, "Delete") {
+                    self.nc_send(NcCommand::WeaponDelete(name.clone()));
+                    self.nc.target = None;
+                }
+            }
+        });
+        if let (ScriptTarget::Npc(_), Some(attrs)) = (&target, &self.nc.view.attributes) {
+            egui::CollapsingHeader::new("Attributes").show(ui, |ui| {
+                ui.monospace(attrs);
+            });
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("script")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.nc.text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(20),
+                );
+            });
+    }
+
+    fn server_tab(&mut self, ui: &mut egui::Ui) {
+        let open = self.server.kind;
+        if !self.view.server.contains_key(&open) && self.server.asked.insert(open) {
+            self.send(Command::ServerGet(open));
+        }
+        ui.horizontal(|ui| {
+            for kind in [ServerKind::Options, ServerKind::Folders, ServerKind::Flags] {
+                if ui
+                    .selectable_label(self.server.kind == kind, kind.name())
+                    .clicked()
+                    && self.server.kind != kind
+                {
+                    self.server.kind = kind;
+                    self.server.save_armed = false;
+                    self.server.text = self
+                        .view
+                        .server
+                        .get(&kind)
+                        .map(|l| l.join("\n"))
+                        .unwrap_or_default();
+                }
+            }
+            ui.separator();
+            let kind = self.server.kind;
+            if ui.button("Read").clicked() {
+                self.server.loaded.remove(&kind);
+                self.send(Command::ServerGet(kind));
+            }
+            if confirm_button(ui, &mut self.server.save_armed, "Save") {
+                let text = self.server.text.clone();
+                self.view.expect_server_set(kind, &text);
+                self.server.loaded.remove(&kind);
+                self.send(Command::ServerSet(kind, text));
+            }
+            if let Some(lines) = self.view.server.get(&kind) {
+                ui.label(format!("{} line(s) on the server", lines.len()));
+            }
+        });
+        ui.label(match self.server.kind {
+            ServerKind::Flags => "One flag per line, name=value. Save replaces them all.",
+            _ => "One item per line. Save replaces the whole text and reads it back.",
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("servertext")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.server.text)
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(24),
+                );
+            });
     }
 }

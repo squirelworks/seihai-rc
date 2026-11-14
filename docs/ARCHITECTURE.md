@@ -40,7 +40,9 @@ scriptable.
 The desktop window (egui, `src/ui.rs`) needs a live session.
 `live::LiveSession` runs the `Session` on its own thread, sends `Update`s
 (events, sent notes, errors, props, close) to the UI over a channel and takes
-`Command`s (chat, PM, admin messages, kick, warp, props, quit) from another.
+`Command`s (chat, PM, admin messages, kick, warp, props, accounts, files,
+NPC-server discovery, quit) from another. `live_nc::LiveNc` does the same
+for the NPC-Control socket, with `NcView` as its state.
 `live::RcView` is the state the window draws, built only from `Update`s, so
 it is tested without egui. No async runtime is needed for one link; do not
 add tokio unless a feature needs many links.
