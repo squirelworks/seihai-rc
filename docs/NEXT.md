@@ -294,3 +294,20 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       repair does not add correlated save acceptance: transport success and
       chat/list notifications do not establish accepted content. A same-target
       GET observes content at that instant, not persistence across restart.
+
+## seihai-core pin
+
+- [x] Direct git dependency moved from tag `v0.1.0`
+      (`708e9e4c19e45bc3db85528e37013921fedb1f10`) to tag `v0.2.16`
+      (`8fb62fbfa2bc770412de8cc470e2f1269676667c`), still
+      `https://github.com/squirelworks/seihai-core` by tag. No Rust change:
+      `Gen5`, the frame codecs, `split_messages`, player props, list replies,
+      `seclogin` and `gtokenize` still match. The `seihai-listserver`
+      dev-dependency stays at rev `4ca985d2675cecff010ff60ec0a1088ff8b1d00a`;
+      its own manifest still depends on `seihai-core` tag `v0.1.0`, so the
+      lock keeps that copy for the listserver alone. Evidence: Linux stable
+      `cargo test` on loopback, including `tests/real_listserver.rs` against
+      the listserver on `127.0.0.1`, plus `cargo fmt --check` and clippy with
+      and without `gui`. No real client was checked. macOS was not run
+      (release only). This records the pin. It is not a new runtime claim
+      and not final compatibility clearance.
