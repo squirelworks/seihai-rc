@@ -315,6 +315,14 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
 
 ## seihai-core pin
 
+- [x] Direct dependency updated to published `v0.4.0`
+      (`eb7434ac1fbddc35d127ab4bbe8717e8bf1d64e7`). The retained listserver
+      dev-dependency still requires its separate `v0.1.0` core copy. RC has
+      one manifest and no exhaustive scripting `Era` matches to update.
+      This dependency update does not establish native V140 behavior or
+      argument semantics. Consumer CI supplies build/test evidence; no native
+      client or real-fork GUI validation is claimed.
+
 - [x] Direct git dependency moved from tag `v0.1.0`
       (`708e9e4c19e45bc3db85528e37013921fedb1f10`) to tag `v0.2.16`
       (`8fb62fbfa2bc770412de8cc470e2f1269676667c`), still
