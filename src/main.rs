@@ -16,10 +16,11 @@ use seihai_rc::nc::{
     class_delete_message, class_get_message, class_set_message, npc_add_message,
     npc_delete_message, npc_flags_get_message, npc_flags_set_message, npc_get_message,
     npc_reset_message, npc_script_get_message, npc_script_set_message, npc_warp_message,
-    observe_script, representable_npc_class_script, representable_weapon_script,
+    observe_script, representable_npc_class_script_for, representable_weapon_script,
     weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcEvent,
     NcSession, NewNpc, ScriptObservation, ScriptSubject,
 };
+use seihai_rc::wire::ServerTextProfile;
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, edit_flags,
     edit_weapons, parse_ban, parse_comments, parse_prop_edit, parse_props, parse_rights,
@@ -250,6 +251,11 @@ OPTIONS:
                        and password go sealed. Needs --server-key.
   --server-key KEY     The listserver's Ed25519 public key, unpadded
                        base64. The password is not sent if it does not match.
+  --server-profile P   How to decode tokenized text from the peer:
+                       seihai-gserver (default; also used for unknown),
+                       gserver-v2-seihai (fork doubles quoted backslashes),
+                       gserver-v2-beta4 (provisional; same decode as
+                       seihai-gserver until upstream encode is pinned).
   --out FILE           files get: write the file here (default stdout).
   --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
   --json               players list and rcs list: one JSON array.
@@ -298,6 +304,7 @@ struct Opts {
     out: Option<String>,
     script_flag: bool,
     secure_login: bool,
+    server_profile: Option<String>,
     tsv: bool,
     json: bool,
     verbose: bool,
@@ -359,6 +366,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Opts, String> {
             "--out" => o.out = Some(val!(&a)),
             "--server-key" => o.server_key = Some(val!(&a)),
             "--secure-login" => o.secure_login = true,
+            "--server-profile" => o.server_profile = Some(val!(&a)),
             "--timeout" => o.timeout = Some(num(&a, val!(&a))?),
             "--settle" => o.settle = Some(num(&a, val!(&a))?),
             "--for" => o.for_secs = Some(num(&a, val!(&a))?),
@@ -643,9 +651,13 @@ fn cmd_nc_login(o: &Opts) -> Result<(), String> {
         .server
         .clone()
         .ok_or("nc login needs --server HOST:PORT")?;
-    let mut s = NcSession::login(&addr, &c.account, &c.password, c.timeout)
+    let profile = server_profile(o)?;
+    let mut s = NcSession::login_with_profile(&addr, &c.account, &c.password, c.timeout, profile)
         .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
-    eprintln!("connected to {addr} as {} (NPC Control)", c.account);
+    eprintln!(
+        "connected to {addr} as {} (NPC Control; server text profile {profile})",
+        c.account
+    );
     let secs = o.for_secs.unwrap_or(5);
     let deadline = if secs == 0 {
         Instant::now() + Duration::from_secs(u64::from(u32::MAX))
@@ -1772,15 +1784,31 @@ fn one_npc_endpoint(found: &[NpcServerFound]) -> Result<String, String> {
     Err(msg)
 }
 
+fn server_profile(o: &Opts) -> Result<ServerTextProfile, String> {
+    match &o.server_profile {
+        None => Ok(ServerTextProfile::default()),
+        Some(name) => ServerTextProfile::parse(name).ok_or_else(|| {
+            format!(
+                "unknown --server-profile {name} (want seihai-gserver, gserver-v2-seihai, or gserver-v2-beta4)"
+            )
+        }),
+    }
+}
+
 fn connect_nc(o: &Opts, c: &Common) -> Result<NcSession, String> {
     let addr = nc_address(o, c)?;
-    let mut session = NcSession::connect(&addr, &c.account, &c.password, c.timeout)
-        .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
+    let profile = server_profile(o)?;
+    let mut session =
+        NcSession::connect_with_profile(&addr, &c.account, &c.password, c.timeout, profile)
+            .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
     let peek = Duration::from_millis(200).min(c.timeout);
     session
         .peek(Instant::now() + peek)
         .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
-    eprintln!("connected to {addr} as {} (NPC Control)", c.account);
+    eprintln!(
+        "connected to {addr} as {} (NPC Control; server text profile {profile})",
+        c.account
+    );
     Ok(session)
 }
 
@@ -2007,6 +2035,7 @@ fn cmd_nc_npc_set(o: &Opts, id_text: &str) -> Result<(), String> {
     let get_msg = npc_script_get_message(id).map_err(|e| e.to_string())?;
     let c = common(o)?;
     let session = connect_nc(o, &c)?;
+    let expected = representable_npc_class_script_for(session.server_profile(), &script);
     read_script_back(
         session,
         o,
@@ -2014,7 +2043,7 @@ fn cmd_nc_npc_set(o: &Opts, id_text: &str) -> Result<(), String> {
         set_msg,
         get_msg,
         ScriptSubject::Npc(id),
-        &representable_npc_class_script(&script),
+        &expected,
     )
 }
 
@@ -2218,6 +2247,7 @@ fn cmd_nc_class_set(o: &Opts, name: &str) -> Result<(), String> {
     let get_msg = class_get_message(name).map_err(|e| e.to_string())?;
     let c = common(o)?;
     let session = connect_nc(o, &c)?;
+    let expected = representable_npc_class_script_for(session.server_profile(), &script);
     read_script_back(
         session,
         o,
@@ -2225,7 +2255,7 @@ fn cmd_nc_class_set(o: &Opts, name: &str) -> Result<(), String> {
         set_msg,
         get_msg,
         ScriptSubject::Class(name.to_string()),
-        &representable_npc_class_script(&script),
+        &expected,
     )
 }
 

@@ -401,12 +401,27 @@ that one is. A peer that sends only one script for several gets of that
 target retires the oldest finished read and leaves the newer read still
 waiting.
 
-`representable_npc_class_script` calls the shared decoder. A trailing
-empty field in that normalized text has to come back on the same read.
-An independent reply that drops it, or adds another, is not a match.
-Issue #56's escaped-producer contract is still open. A match is the
-script observed on that read. It does not show that the script is still
-there after a restart.
+`representable_npc_class_script` (and the `_for` form) call the shared
+decoder with the session's **server text profile**. A trailing empty
+field in that normalized text has to come back on the same read. An
+independent reply that drops it, or adds another, is not a match. A
+match is the script observed on that read. It does not show that the
+script is still there after a restart.
+
+### Server text profiles (tokenized decode)
+
+Identical tokenized bytes can mean different logical text depending on
+the producer (issue #56). The NC session holds a profile; unknown peers
+use `seihai-gserver`. Override with `--server-profile`.
+
+| Profile | Quoted backslash decode |
+|---|---|
+| `seihai-gserver` (default) | Keep as sent (rc follows this gserver) |
+| `gserver-v2-seihai` | Undouble `\\` → `\` inside quotes |
+| `gserver-v2-beta4` | Provisional: same as `seihai-gserver` until upstream encode is pinned |
+
+Weapon scripts use `0xA7` newlines and are outside this table. Auto-detect
+from a server identity string is not wired yet.
 
 Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
 192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s
