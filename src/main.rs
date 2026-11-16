@@ -20,7 +20,6 @@ use seihai_rc::nc::{
     weapon_delete_message, weapon_get_message, weapon_list_message, weapon_set_message, NcEvent,
     NcSession, NewNpc, ScriptObservation, ScriptSubject,
 };
-use seihai_rc::wire::ServerTextProfile;
 use seihai_rc::players::{
     admin_message, ban_get, ban_set, comments_get, comments_set, disconnect_player, edit_flags,
     edit_weapons, parse_ban, parse_comments, parse_prop_edit, parse_props, parse_rights,
@@ -34,6 +33,7 @@ use seihai_rc::rc::{
 use seihai_rc::server::{
     flags_get, flags_set, normalized, parse_flags, parse_text, plo as server_plo, ServerText,
 };
+use seihai_rc::wire::ServerTextProfile;
 
 const USAGE: &str = "\
 seihai-rc: Graal Remote Control client (stage 1, player actions, NPC Control)

@@ -476,10 +476,7 @@ pub fn parse_npc_script(payload: &[u8]) -> Option<(u32, String)> {
 }
 
 /// Id 160: GINT3 id, then the script tokenized, one item per line.
-pub fn parse_npc_script_for(
-    profile: ServerTextProfile,
-    payload: &[u8],
-) -> Option<(u32, String)> {
+pub fn parse_npc_script_for(profile: ServerTextProfile, payload: &[u8]) -> Option<(u32, String)> {
     let id = read_gint3(payload)? as u32;
     Some((id, detokenized_for(profile, payload.get(3..)?)))
 }
@@ -495,10 +492,7 @@ pub fn parse_npc_flags_for(
     payload: &[u8],
 ) -> Option<(u32, Vec<String>)> {
     let id = read_gint3(payload)? as u32;
-    Some((
-        id,
-        gdetokenize_for(profile, &text(payload.get(3..)?)),
-    ))
+    Some((id, gdetokenize_for(profile, &text(payload.get(3..)?))))
 }
 
 /// Id 162 under the default seihai-gserver profile.

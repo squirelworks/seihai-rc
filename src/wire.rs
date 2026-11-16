@@ -283,7 +283,10 @@ mod tests {
             gdetokenize_for(ServerTextProfile::GserverV2Seihai, r#"C:\\tmp"#),
             [r#"C:\\tmp"#]
         );
-        assert_eq!(ServerTextProfile::parse("fork"), Some(ServerTextProfile::GserverV2Seihai));
+        assert_eq!(
+            ServerTextProfile::parse("fork"),
+            Some(ServerTextProfile::GserverV2Seihai)
+        );
         assert_eq!(ServerTextProfile::default().as_str(), "seihai-gserver");
     }
 

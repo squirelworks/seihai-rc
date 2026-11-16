@@ -205,10 +205,7 @@ fn command_subject(c: &NcCommand) -> Option<ScriptSubject> {
     }
 }
 
-fn save_expectation(
-    profile: ServerTextProfile,
-    c: &NcCommand,
-) -> Option<(ScriptSubject, String)> {
+fn save_expectation(profile: ServerTextProfile, c: &NcCommand) -> Option<(ScriptSubject, String)> {
     match c {
         NcCommand::NpcScriptSet { id, script } => Some((
             ScriptSubject::Npc(*id),
