@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use crate::nc::{
     class_delete_message, class_get_message, class_set_message, matching_script,
     npc_delete_message, npc_get_message, npc_reset_message, npc_script_get_message,
-    npc_script_set_message, rc_chat_refusal, representable_npc_class_script,
+    npc_script_set_message, rc_chat_refusal, representable_npc_class_script_for,
     representable_weapon_script, script_subject_phrase, weapon_delete_message, weapon_get_message,
     weapon_list_message, weapon_set_message, NcError, NcEvent, NcLists, NcSession,
     ScriptObservation, ScriptSubject,
 };
+use crate::wire::ServerTextProfile;
 
 const POLL: Duration = Duration::from_millis(50);
 
@@ -112,11 +113,30 @@ pub struct LiveNc {
 
 impl LiveNc {
     /// Log in to the NPC-server at `addr` on a new thread, then ask for the
-    /// weapon list (the NPCs and classes come by themselves).
+    /// weapon list (the NPCs and classes come by themselves). Uses the
+    /// default seihai-gserver text profile.
     pub fn start(addr: String, account: String, password: String, timeout: Duration) -> Self {
+        Self::start_with_profile(
+            addr,
+            account,
+            password,
+            timeout,
+            ServerTextProfile::default(),
+        )
+    }
+
+    /// [`Self::start`] with an explicit server text profile.
+    pub fn start_with_profile(
+        addr: String,
+        account: String,
+        password: String,
+        timeout: Duration,
+        profile: ServerTextProfile,
+    ) -> Self {
         let (ctx, crx) = mpsc::channel();
         let (utx, urx) = mpsc::channel();
-        let worker = thread::spawn(move || run(addr, account, password, timeout, crx, utx));
+        let worker =
+            thread::spawn(move || run(addr, account, password, timeout, profile, crx, utx));
         Self {
             commands: ctx,
             updates: urx,
@@ -185,15 +205,15 @@ fn command_subject(c: &NcCommand) -> Option<ScriptSubject> {
     }
 }
 
-fn save_expectation(c: &NcCommand) -> Option<(ScriptSubject, String)> {
+fn save_expectation(profile: ServerTextProfile, c: &NcCommand) -> Option<(ScriptSubject, String)> {
     match c {
         NcCommand::NpcScriptSet { id, script } => Some((
             ScriptSubject::Npc(*id),
-            representable_npc_class_script(script),
+            representable_npc_class_script_for(profile, script),
         )),
         NcCommand::ClassSet { name, script } => Some((
             ScriptSubject::Class(name.clone()),
-            representable_npc_class_script(script),
+            representable_npc_class_script_for(profile, script),
         )),
         NcCommand::WeaponSet { name, script, .. } => Some((
             ScriptSubject::Weapon(name.clone()),
@@ -346,17 +366,23 @@ fn run(
     account: String,
     password: String,
     timeout: Duration,
+    profile: ServerTextProfile,
     commands: Receiver<NcCommand>,
     updates: Sender<NcUpdate>,
 ) {
-    let mut s = match NcSession::login(&addr, &account, &password, timeout) {
+    let mut s = match NcSession::login_with_profile(&addr, &account, &password, timeout, profile) {
         Ok(s) => s,
         Err(e) => {
             let _ = updates.send(NcUpdate::LoginFailed(format!("{addr}: {e}")));
             return;
         }
     };
-    if updates.send(NcUpdate::Connected(addr)).is_err() {
+    if updates
+        .send(NcUpdate::Connected(format!(
+            "{addr} (server text profile {profile})"
+        )))
+        .is_err()
+    {
         s.close();
         return;
     }
@@ -382,7 +408,9 @@ fn run(
                         } else {
                             match s.send(&msgs) {
                                 Ok(()) => {
-                                    if let Some((subject, expected)) = save_expectation(&c) {
+                                    if let Some((subject, expected)) =
+                                        save_expectation(s.server_profile(), &c)
+                                    {
                                         let phrase = script_subject_phrase(&subject);
                                         reads.push(read_slot(subject, Some(expected), timeout));
                                         let _ = updates.send(NcUpdate::Sent(format!(

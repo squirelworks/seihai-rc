@@ -109,11 +109,77 @@ pub fn rc_tokenize(lines: &[&str]) -> String {
         .join(",")
 }
 
-/// Read tokenized text back into lines. A quoted item runs to its closing
-/// quote (`""` inside is one `"`; backslashes stay literal);
-/// an unquoted item runs to the next comma. A final comma adds an empty
-/// field. Spaces around an item are dropped. Empty text gives no lines.
+/// How a connected server encodes tokenized RC text.
+///
+/// Same idea as client version profiles: identical wire bytes can mean
+/// different logical text depending on the producer. Quirks live in this
+/// table. Unknown servers use [`Self::SeihaiGserver`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ServerTextProfile {
+    /// seihai-gserver: backslashes in quoted fields stay as sent. Default
+    /// for an unknown server.
+    #[default]
+    SeihaiGserver,
+    /// GServer-v2 `seihai` branch: backslashes are doubled inside quoted
+    /// fields on the wire, so a GET decoder must undouble them.
+    GserverV2Seihai,
+    /// GServer-v2 upstream beta4. Encode facts are still open
+    /// (Graal_analysis gap #41); until pinned, decode matches
+    /// [`Self::SeihaiGserver`] so this profile does not invent collapse.
+    GserverV2Beta4,
+}
+
+impl ServerTextProfile {
+    /// CLI / config names.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SeihaiGserver => "seihai-gserver",
+            Self::GserverV2Seihai => "gserver-v2-seihai",
+            Self::GserverV2Beta4 => "gserver-v2-beta4",
+        }
+    }
+
+    /// Parse a CLI name. Accepts the `as_str` forms and a few short aliases.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "seihai-gserver" | "seihai" | "gserver" => Some(Self::SeihaiGserver),
+            "gserver-v2-seihai" | "gserver-v2" | "fork" => Some(Self::GserverV2Seihai),
+            "gserver-v2-beta4" | "beta4" => Some(Self::GserverV2Beta4),
+            _ => None,
+        }
+    }
+
+    /// Whether quoted fields undouble `\\` to `\`.
+    pub fn undouble_quoted_backslashes(self) -> bool {
+        match self {
+            Self::SeihaiGserver | Self::GserverV2Beta4 => false,
+            Self::GserverV2Seihai => true,
+        }
+    }
+}
+
+impl std::fmt::Display for ServerTextProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Read tokenized text back into lines with the seihai-gserver profile
+/// (literal backslashes). Prefer [`gdetokenize_for`] when the peer's
+/// profile is known.
 pub fn gdetokenize(text: &str) -> Vec<String> {
+    gdetokenize_for(ServerTextProfile::SeihaiGserver, text)
+}
+
+/// Read tokenized text back into lines for `profile`.
+///
+/// A quoted item runs to its closing quote (`""` inside is one `"`). With
+/// [`ServerTextProfile::GserverV2Seihai`], `\\` inside quotes becomes one
+/// `\`; other profiles keep backslashes literal. An unquoted item runs to
+/// the next comma. A final comma adds an empty field. Spaces around an
+/// item are dropped. Empty text gives no lines.
+pub fn gdetokenize_for(profile: ServerTextProfile, text: &str) -> Vec<String> {
+    let undouble = profile.undouble_quoted_backslashes();
     let mut out = Vec::new();
     let mut chars = text.chars().peekable();
     loop {
@@ -134,6 +200,9 @@ pub fn gdetokenize(text: &str) -> Vec<String> {
                     } else {
                         break;
                     }
+                } else if c == '\\' && undouble && chars.peek() == Some(&'\\') {
+                    chars.next();
+                    item.push('\\');
                 } else {
                     item.push(c);
                 }
@@ -174,6 +243,51 @@ mod tests {
         assert_eq!(gdetokenize(r#""a,""b"",c""#), ["a,\"b\",c"]);
         assert_eq!(gdetokenize(r#"C:\tmp"#), [r#"C:\tmp"#]);
         assert!(gdetokenize("").is_empty());
+    }
+
+    /// One fixture per server text profile: same logical script, the wire
+    /// each producer emits for a quoted line with a backslash, and the
+    /// decode that profile must return.
+    #[test]
+    fn server_text_profile_fixtures_round_trip_quoted_backslash() {
+        // Logical script text an editor should show for one backslash.
+        let logical = r#"echo("C:\tmp", 1);"#;
+        // seihai-gserver quotes every field and doubles `"` only, so one
+        // backslash on the wire means one backslash in the script.
+        let seihai_wire = r#""echo(""C:\tmp"", 1);""#;
+        assert_eq!(
+            gdetokenize_for(ServerTextProfile::SeihaiGserver, seihai_wire),
+            [logical]
+        );
+        // GServer-v2 seihai doubles backslashes inside quotes. The same
+        // logical text therefore arrives with `\\` on the wire.
+        let fork_wire = r#""echo(""C:\\tmp"", 1);""#;
+        assert_eq!(
+            gdetokenize_for(ServerTextProfile::GserverV2Seihai, fork_wire),
+            [logical]
+        );
+        // Without that profile the same fork bytes stay doubled (ambiguous
+        // without a producer contract).
+        assert_eq!(
+            gdetokenize_for(ServerTextProfile::SeihaiGserver, fork_wire),
+            [r#"echo("C:\\tmp", 1);"#]
+        );
+        // beta4 encode is still open (gap #41). Until pinned, this profile
+        // keeps literals like seihai-gserver.
+        assert_eq!(
+            gdetokenize_for(ServerTextProfile::GserverV2Beta4, seihai_wire),
+            [logical]
+        );
+        // Unquoted bare path is never undoubled.
+        assert_eq!(
+            gdetokenize_for(ServerTextProfile::GserverV2Seihai, r#"C:\\tmp"#),
+            [r#"C:\\tmp"#]
+        );
+        assert_eq!(
+            ServerTextProfile::parse("fork"),
+            Some(ServerTextProfile::GserverV2Seihai)
+        );
+        assert_eq!(ServerTextProfile::default().as_str(), "seihai-gserver");
     }
 
     #[test]

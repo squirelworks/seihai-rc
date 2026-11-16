@@ -302,11 +302,15 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       Decoder and NPC/class reply regressions cover quotes,
       backslashes and internal/trailing empty lines. Empty input still has no
       fields; saving still omits one final line feed, separately from decoding.
-- [ ] Escaped-backslash replies (#56): the current Rust server preserves
-      literal backslashes, while an escaping producer doubles them. Identical
-      payloads are ambiguous; generic decoding preserves literals. Supporting
-      escaped producers requires an explicit producer contract, not guessing
-      from bytes. #57 does not resolve this part of #56.
+- [x] Escaped-backslash replies (#56): server text profiles on the NC
+      connection (`seihai-gserver` default / unknown, `gserver-v2-seihai`
+      undoubles quoted `\\`, `gserver-v2-beta4` provisional literal until
+      upstream encode is pinned). Manual override: `--server-profile`.
+      One fixture per profile in `wire` tests; NPC script parse uses the
+      session profile. #57 covered trailing empty fields.
+- [ ] Server text profile follow-ups (#56): auto-detect from what the
+      server identifies as; pin `gserver-v2-beta4` encode from upstream
+      source (Graal_analysis gap #41).
 - [ ] Real-fork GUI acceptance remains outstanding (#27), including reopening,
       editing and saving scripts after reconnect or target switches. This parser
       repair does not add correlated save acceptance: transport success and

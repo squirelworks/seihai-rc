@@ -19,8 +19,8 @@ use seihai_core::protocol::{read_gint3, Message};
 use crate::link::{Codec, Link};
 use crate::rc::LoginError;
 use crate::wire::{
-    gchar, gdetokenize, latin1_bytes, message, push_gint3, push_gstring, rc_tokenize, read_gstring,
-    text,
+    gchar, gdetokenize_for, latin1_bytes, message, push_gint3, push_gstring, rc_tokenize,
+    read_gstring, text, ServerTextProfile,
 };
 
 /// Client type on the NPC-Control socket.
@@ -207,16 +207,22 @@ fn weapon_script_text(bytes: &[u8]) -> String {
     text(bytes).replace('\u{a7}', "\n")
 }
 
-/// The NPC or class script a later get can show for `script`.
+/// The NPC or class script a later get can show for `script` under the
+/// default ([`ServerTextProfile::SeihaiGserver`]) decode.
 ///
 /// Carriage returns before line feeds are dropped, and one final line feed
 /// is not stored: that is how ids 109 and 113 are built. The result is what
 /// reading those bytes back produces, so the comparison follows this
-/// client's tokenizer. A character outside Latin-1 becomes `?`. This is the
-/// text to compare with id 160 or 162. A match is that read, not a later
-/// restart.
+/// client's tokenizer and the peer's text profile. A character outside
+/// Latin-1 becomes `?`. This is the text to compare with id 160 or 162. A
+/// match is that read, not a later restart.
 pub fn representable_npc_class_script(script: &str) -> String {
-    detokenized(&tokenized_script(script))
+    representable_npc_class_script_for(ServerTextProfile::SeihaiGserver, script)
+}
+
+/// [`representable_npc_class_script`] for an explicit server text profile.
+pub fn representable_npc_class_script_for(profile: ServerTextProfile, script: &str) -> String {
+    detokenized_for(profile, &tokenized_script(script))
 }
 
 /// The weapon script a later get can show for `script`.
@@ -460,27 +466,48 @@ pub fn parse_id_only(payload: &[u8]) -> Option<u32> {
 
 /// Tokenized text (157, 160, 161, 162) back into lines joined by line
 /// feeds, as the real RCs show it.
-fn detokenized(bytes: &[u8]) -> String {
-    gdetokenize(&text(bytes)).join("\n")
+fn detokenized_for(profile: ServerTextProfile, bytes: &[u8]) -> String {
+    gdetokenize_for(profile, &text(bytes)).join("\n")
+}
+
+/// Id 160 under the default seihai-gserver profile.
+pub fn parse_npc_script(payload: &[u8]) -> Option<(u32, String)> {
+    parse_npc_script_for(ServerTextProfile::SeihaiGserver, payload)
 }
 
 /// Id 160: GINT3 id, then the script tokenized, one item per line.
-pub fn parse_npc_script(payload: &[u8]) -> Option<(u32, String)> {
+pub fn parse_npc_script_for(profile: ServerTextProfile, payload: &[u8]) -> Option<(u32, String)> {
     let id = read_gint3(payload)? as u32;
-    Some((id, detokenized(payload.get(3..)?)))
+    Some((id, detokenized_for(profile, payload.get(3..)?)))
+}
+
+/// Id 161 under the default seihai-gserver profile.
+pub fn parse_npc_flags(payload: &[u8]) -> Option<(u32, Vec<String>)> {
+    parse_npc_flags_for(ServerTextProfile::SeihaiGserver, payload)
 }
 
 /// Id 161: GINT3 id, then the flags tokenized, one per item.
-pub fn parse_npc_flags(payload: &[u8]) -> Option<(u32, Vec<String>)> {
+pub fn parse_npc_flags_for(
+    profile: ServerTextProfile,
+    payload: &[u8],
+) -> Option<(u32, Vec<String>)> {
     let id = read_gint3(payload)? as u32;
-    Some((id, gdetokenize(&text(payload.get(3..)?))))
+    Some((id, gdetokenize_for(profile, &text(payload.get(3..)?))))
+}
+
+/// Id 162 under the default seihai-gserver profile.
+pub fn parse_class_script(payload: &[u8]) -> Option<(String, String)> {
+    parse_class_script_for(ServerTextProfile::SeihaiGserver, payload)
 }
 
 /// Id 162: GSTRING name, then the script tokenized, one item per line.
-pub fn parse_class_script(payload: &[u8]) -> Option<(String, String)> {
+pub fn parse_class_script_for(
+    profile: ServerTextProfile,
+    payload: &[u8],
+) -> Option<(String, String)> {
     let mut i = 0;
     let name = text(&read_gstring(payload, &mut i)?);
-    Some((name, detokenized(&payload[i..])))
+    Some((name, detokenized_for(profile, &payload[i..])))
 }
 
 /// Id 167: repeated GSTRING names. A truncated string fails the whole list.
@@ -576,8 +603,13 @@ pub enum NcEvent {
     Message { id: u8, payload: Vec<u8> },
 }
 
-/// Read one server message.
+/// Read one server message under the default seihai-gserver profile.
 pub fn parse_event(m: &Message) -> NcEvent {
+    parse_event_for(ServerTextProfile::SeihaiGserver, m)
+}
+
+/// Read one server message with `profile` for tokenized text.
+pub fn parse_event_for(profile: ServerTextProfile, m: &Message) -> NcEvent {
     let p = &m.payload;
     match m.id {
         NC_DISCMESSAGE => NcEvent::Disconnect(text(p)),
@@ -595,7 +627,7 @@ pub fn parse_event(m: &Message) -> NcEvent {
                 payload: p.clone(),
             },
         },
-        NC_NPC_FLAGS => match parse_npc_flags(p) {
+        NC_NPC_FLAGS => match parse_npc_flags_for(profile, p) {
             Some((id, flags)) => NcEvent::NpcFlags { id, flags },
             None => NcEvent::Message {
                 id: m.id,
@@ -609,7 +641,7 @@ pub fn parse_event(m: &Message) -> NcEvent {
                 payload: p.clone(),
             },
         },
-        NC_NPC_ATTRIBUTES => NcEvent::Attributes(detokenized(p)),
+        NC_NPC_ATTRIBUTES => NcEvent::Attributes(detokenized_for(profile, p)),
         NC_NPC_ROW => match parse_npc_add(p) {
             Some(row) => NcEvent::Npc(row),
             None => NcEvent::Message {
@@ -624,14 +656,14 @@ pub fn parse_event(m: &Message) -> NcEvent {
                 payload: p.clone(),
             },
         },
-        NC_NPC_SCRIPT => match parse_npc_script(p) {
+        NC_NPC_SCRIPT => match parse_npc_script_for(profile, p) {
             Some((id, script)) => NcEvent::NpcScript { id, script },
             None => NcEvent::Message {
                 id: m.id,
                 payload: p.clone(),
             },
         },
-        NC_CLASS_SCRIPT => match parse_class_script(p) {
+        NC_CLASS_SCRIPT => match parse_class_script_for(profile, p) {
             Some((name, script)) => NcEvent::ClassScript { name, script },
             None => NcEvent::Message {
                 id: m.id,
@@ -828,16 +860,36 @@ pub struct NcSession {
     link: Link,
     pending: Vec<NcEvent>,
     pub lists: NcLists,
+    /// How tokenized replies from this peer are decoded.
+    profile: ServerTextProfile,
 }
 
 impl NcSession {
     /// Connect and send the type-3 login. Returns as soon as that frame is
-    /// written. Call [`Self::peek`] to catch an immediate refusal.
+    /// written. Call [`Self::peek`] to catch an immediate refusal. Uses the
+    /// default seihai-gserver text profile.
     pub fn connect(
         addr: &str,
         account: &str,
         password: &str,
         timeout: Duration,
+    ) -> Result<Self, LoginError> {
+        Self::connect_with_profile(
+            addr,
+            account,
+            password,
+            timeout,
+            ServerTextProfile::default(),
+        )
+    }
+
+    /// [`Self::connect`] with an explicit server text profile.
+    pub fn connect_with_profile(
+        addr: &str,
+        account: &str,
+        password: &str,
+        timeout: Duration,
+        profile: ServerTextProfile,
     ) -> Result<Self, LoginError> {
         let mut link = Link::connect(addr, timeout)?;
         link.send_login(&login_body(account, password), Codec::Plain)?;
@@ -845,7 +897,18 @@ impl NcSession {
             link,
             pending: Vec::new(),
             lists: NcLists::default(),
+            profile,
         })
+    }
+
+    /// The text profile used to decode tokenized replies.
+    pub fn server_profile(&self) -> ServerTextProfile {
+        self.profile
+    }
+
+    /// Override the text profile (manual testing / after auto-detect).
+    pub fn set_server_profile(&mut self, profile: ServerTextProfile) {
+        self.profile = profile;
     }
 
     /// Read one frame, if one arrives before `deadline`. A disconnect message
@@ -866,7 +929,7 @@ impl NcSession {
     }
 
     fn push_parsed(&mut self, m: &Message) -> Result<(), LoginError> {
-        match parse_event(m) {
+        match parse_event_for(self.profile, m) {
             NcEvent::Disconnect(why) => Err(LoginError::Refused(why)),
             ev => {
                 self.lists.apply(&ev);
@@ -882,15 +945,32 @@ impl NcSession {
     /// There is no separate accept packet in the notes, so a link that stays
     /// open counts as accepted. A disconnect message, or a link that closes
     /// before `timeout`, is a refusal. Any other traffic returns at once so
-    /// the caller can read it.
+    /// the caller can read it. Uses the default seihai-gserver text profile.
     pub fn login(
         addr: &str,
         account: &str,
         password: &str,
         timeout: Duration,
     ) -> Result<Self, LoginError> {
+        Self::login_with_profile(
+            addr,
+            account,
+            password,
+            timeout,
+            ServerTextProfile::default(),
+        )
+    }
+
+    /// [`Self::login`] with an explicit server text profile.
+    pub fn login_with_profile(
+        addr: &str,
+        account: &str,
+        password: &str,
+        timeout: Duration,
+        profile: ServerTextProfile,
+    ) -> Result<Self, LoginError> {
         let deadline = Instant::now() + timeout;
-        let mut s = Self::connect(addr, account, password, timeout)?;
+        let mut s = Self::connect_with_profile(addr, account, password, timeout, profile)?;
         loop {
             let Some(msgs) = s.link.recv(deadline)? else {
                 return if s.link.is_closed() {
@@ -921,7 +1001,7 @@ impl NcSession {
                 return Ok(None);
             };
             for m in &msgs {
-                let ev = parse_event(m);
+                let ev = parse_event_for(self.profile, m);
                 self.lists.apply(&ev);
                 self.pending.push(ev);
             }
@@ -1098,6 +1178,28 @@ mod tests {
         assert_eq!(
             rc_tokenize(&[r#"echo("C:\tmp", 1);"#]).as_bytes(),
             &payload[3..]
+        );
+    }
+
+    #[test]
+    fn fork_profile_undoubles_quoted_backslash_on_npc_script() {
+        let logical = r#"echo("C:\tmp", 1);"#;
+        let mut payload = Vec::new();
+        push_gint3(&mut payload, 1001);
+        // Fork wire: doubled backslash inside the quoted field.
+        payload.extend_from_slice(br#""echo(""C:\\tmp"", 1);""#);
+        assert_eq!(
+            parse_npc_script_for(ServerTextProfile::GserverV2Seihai, &payload),
+            Some((1001, logical.into()))
+        );
+        assert_eq!(
+            representable_npc_class_script_for(ServerTextProfile::GserverV2Seihai, logical),
+            logical
+        );
+        // Default / seihai-gserver still keeps the doubled form.
+        assert_eq!(
+            parse_npc_script(&payload),
+            Some((1001, r#"echo("C:\\tmp", 1);"#.into()))
         );
     }
 
