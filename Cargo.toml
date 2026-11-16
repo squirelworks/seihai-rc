@@ -23,7 +23,9 @@ seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.4
 
 [dev-dependencies]
 # The real listserver, for tests/real_listserver.rs. Same licence.
-seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "4ca985d2675cecff010ff60ec0a1088ff8b1d00a" }
+# Pin a listserver commit that already builds on seihai-core v0.4.0 so this
+# lock file has one core (squirelworks/seihai-core#79).
+seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "c348f68e5a91662d34bd59b0dc40d6195946ee5d" }
 
 # The listserver hashes and checks account passwords with argon2, which is
 # very slow unoptimised.
