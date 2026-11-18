@@ -5,12 +5,10 @@ namespace that has only `lo` (no route out). The real RCs ran under Wine
 (32-bit prefix, `explorer /desktop=` virtual desktop) on a headless Xvfb display.
 The Windows 10 lab VM was not used, because another lab held its desktop.
 
-The full message log, with exact hex, is in
-[`2026-11-13-archived-rc-captures-hex.md`](2026-11-13-archived-rc-captures-hex.md).
-That file has one bullet per message, grouped under the UI step that caused it.
-Messages up to 800 bytes are given in full. Longer ones (scripts, server
-options, file pieces) are given as their first 48 bytes, their length and a
-SHA-256 prefix; their content is described below so a test can rebuild it.
+The full per-message hex log is not in the repository: raw lab captures stay
+in the project's private files. This write-up keeps the decoded messages and
+describes the long ones (scripts, server options, file pieces) so a test can
+rebuild them.
 
 ## Setup
 
