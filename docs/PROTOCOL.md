@@ -408,20 +408,32 @@ independent reply that drops it, or adds another, is not a match. A
 match is the script observed on that read. It does not show that the
 script is still there after a restart.
 
-### Server text profiles (tokenized decode)
+### Server text profiles (tokenized text)
 
 Identical tokenized bytes can mean different logical text depending on
-the producer (issue #56). The NC session holds a profile; unknown peers
-use `seihai-gserver`. Override with `--server-profile`.
+the producer (issue #56). The NC session holds a profile, used both to
+write NPC scripts, class scripts, NPC flags and new NPCs (ids 109, 110,
+111, 113) and to read the replies, so a save and a read back agree.
 
-| Profile | Quoted backslash decode |
+The profile is taken from the server's `Server: ` line, an id 74 text in
+the NC login burst: `Server: seihai-gserver VERSION` or `Server:
+GServer-v2 (Seihai) VERSION`. Any other `GServer-v2` or `GS2Emu` name is
+taken as upstream beta4. A server that sends no such line gets
+`seihai-gserver`. `--server-profile` fixes the profile and ignores the
+line. The connect log says which profile was chosen and how.
+
+| Profile | Backslash inside a quoted line |
 |---|---|
-| `seihai-gserver` (default) | Keep as sent (rc follows this gserver) |
-| `gserver-v2-seihai` | Undouble `\\` → `\` inside quotes |
-| `gserver-v2-beta4` | Provisional: same as `seihai-gserver` until upstream encode is pinned |
+| `seihai-gserver` (default) | Kept as sent, both ways (rc follows this gserver) |
+| `gserver-v2-seihai` | Doubled on the wire: written as `\\`, read back to `\` |
+| `gserver-v2-beta4` | As `gserver-v2-seihai`. Pinned from upstream `bc54973`: its CSV writer quotes a line holding `"`, `,`, `\` or a byte outside 32..126 and doubles `"` and `\` inside |
 
-Weapon scripts use `0xA7` newlines and are outside this table. Auto-detect
-from a server identity string is not wired yet.
+Before #56's follow-up, rc always wrote the doubled form, so each save to
+seihai-gserver added a backslash. The 2004 RC and RC3 write the doubled
+form too (lab 2026-11-13), which seihai-gserver does not undouble
+(squirelworks/seihai-gserver#160).
+
+Weapon scripts use `0xA7` newlines and are outside this table.
 
 Ids above 114 the fork sent to an NC in that run: 157 to 163, 167, 188 and
 192. Below it: 25, 29, 33 and 74. RC3 also sends an empty 103 every ~30 s

@@ -308,9 +308,11 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       upstream encode is pinned). Manual override: `--server-profile`.
       One fixture per profile in `wire` tests; NPC script parse uses the
       session profile. #57 covered trailing empty fields.
-- [ ] Server text profile follow-ups (#56): auto-detect from what the
-      server identifies as; pin `gserver-v2-beta4` encode from upstream
-      source (Graal_analysis gap #41).
+- [x] Server text profile follow-ups (#56): the profile follows the
+      server's `Server: ` line in the NC login burst; `gserver-v2-beta4`
+      pinned from upstream `bc54973` (doubles quoted backslashes, like the
+      fork); NPC/class script, flag and new-NPC writes use the profile too,
+      so a save to seihai-gserver no longer adds a backslash.
 - [ ] Real-fork GUI acceptance remains outstanding (#27), including reopening,
       editing and saving scripts after reconnect or target switches. This parser
       repair does not add correlated save acceptance: transport success and
