@@ -1227,16 +1227,18 @@ mod tests {
     }
 
     #[test]
-    fn rust_server_script_reply_keeps_literal_backslashes() {
-        // Current Rust server wire::tokenize quotes every field and doubles
-        // quotes only. This fixture is its NPC script reply payload.
+    fn legacy_rust_server_script_reply_keeps_literal_backslashes() {
+        // seihai-gserver before #160 quoted every field and doubled quotes
+        // only. This fixture is its NPC script reply payload.
         let script = r#"echo("C:\\tmp", 1);"#;
         let mut payload = Vec::new();
         push_gint3(&mut payload, 1001);
         payload.extend_from_slice(br#""echo(""C:\\tmp"", 1);""#);
-        assert_eq!(parse_npc_script(&payload), Some((1001, script.into())));
-        // The same bytes can encode one backslash with an escaping producer.
-        // Without a producer contract the generic decoder must not guess.
+        assert_eq!(
+            parse_npc_script_for(ServerTextProfile::SeihaiGserverLegacy, &payload),
+            Some((1001, script.into()))
+        );
+        // The same bytes are one backslash from every current server.
         assert_eq!(
             rc_tokenize(&[r#"echo("C:\tmp", 1);"#]).as_bytes(),
             &payload[3..]
@@ -1258,11 +1260,8 @@ mod tests {
             representable_npc_class_script_for(ServerTextProfile::GserverV2Seihai, logical),
             logical
         );
-        // Default / seihai-gserver still keeps the doubled form.
-        assert_eq!(
-            parse_npc_script(&payload),
-            Some((1001, r#"echo("C:\\tmp", 1);"#.into()))
-        );
+        // Default / seihai-gserver since #160 reads it the same way.
+        assert_eq!(parse_npc_script(&payload), Some((1001, logical.into())));
     }
 
     #[test]

@@ -419,19 +419,21 @@ The profile is taken from the server's `Server: ` line, an id 74 text in
 the NC login burst: `Server: seihai-gserver VERSION` or `Server:
 GServer-v2 (Seihai) VERSION`. Any other `GServer-v2` or `GS2Emu` name is
 taken as upstream beta4. A server that sends no such line gets
-`seihai-gserver`. `--server-profile` fixes the profile and ignores the
+`seihai-gserver`, which reads like the real servers. `--server-profile` fixes the profile and ignores the
 line. The connect log says which profile was chosen and how.
 
 | Profile | Backslash inside a quoted line |
 |---|---|
-| `seihai-gserver` (default) | Kept as sent, both ways (rc follows this gserver) |
-| `gserver-v2-seihai` | Doubled on the wire: written as `\\`, read back to `\` |
-| `gserver-v2-beta4` | As `gserver-v2-seihai`. Pinned from upstream `bc54973`: its CSV writer quotes a line holding `"`, `,`, `\` or a byte outside 32..126 and doubles `"` and `\` inside |
+| `seihai-gserver` (default) | Doubled on the wire: written as `\\`, read back to `\`. seihai-gserver does this since squirelworks/seihai-gserver#160, like real RCs and gs2lib's `gtokenize`/`guntokenize` |
+| `seihai-gserver-legacy` | Kept as sent, both ways: a seihai-gserver from before #160, which sends no `Server: ` line. Only by `--server-profile` |
+| `gserver-v2-seihai` | Doubled, as `seihai-gserver` |
+| `gserver-v2-beta4` | Doubled. Pinned from upstream `bc54973`: its CSV writer quotes a line holding `"`, `,`, `\` or a byte outside 32..126 and doubles `"` and `\` inside |
 
 Before #56's follow-up, rc always wrote the doubled form, so each save to
 seihai-gserver added a backslash. The 2004 RC and RC3 write the doubled
-form too (lab 2026-11-13), which seihai-gserver does not undouble
-(squirelworks/seihai-gserver#160).
+form too (lab 2026-11-13), so seihai-gserver#160 moved seihai-gserver to
+it: every current server now reads and writes the same form, and the
+legacy profile is only for an older seihai-gserver.
 
 Weapon scripts use `0xA7` newlines and are outside this table.
 

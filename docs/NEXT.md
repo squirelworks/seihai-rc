@@ -313,6 +313,10 @@ Behaviour: Graal_analysis `protocol/npc-control.md` (link; do not paste it).
       pinned from upstream `bc54973` (doubles quoted backslashes, like the
       fork); NPC/class script, flag and new-NPC writes use the profile too,
       so a save to seihai-gserver no longer adds a backslash.
+- [x] seihai-gserver#160: seihai-gserver now doubles quoted backslashes
+      like the real servers, so the `seihai-gserver` profile (default)
+      doubles too; `seihai-gserver-legacy` keeps the old literal form for
+      a server from before that change.
 - [ ] Real-fork GUI acceptance remains outstanding (#27), including reopening,
       editing and saving scripts after reconnect or target switches. This parser
       repair does not add correlated save acceptance: transport success and

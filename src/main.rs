@@ -254,9 +254,11 @@ OPTIONS:
   --server-profile P   How tokenized NC text is written and read for the
                        peer. Without it, rc takes the profile from the
                        server's Server: line, or seihai-gserver when there
-                       is none. seihai-gserver (backslashes as sent),
-                       gserver-v2-seihai or gserver-v2-beta4 (both double
-                       backslashes inside quoted lines).
+                       is none. seihai-gserver, gserver-v2-seihai and
+                       gserver-v2-beta4 double backslashes inside quoted
+                       lines, as real servers do; seihai-gserver-legacy
+                       (a seihai-gserver from before its #160) keeps them
+                       as sent.
   --out FILE           files get: write the file here (default stdout).
   --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
   --json               players list and rcs list: one JSON array.
@@ -1794,7 +1796,7 @@ fn server_profile(o: &Opts) -> Result<Option<ServerTextProfile>, String> {
         None => Ok(None),
         Some(name) => ServerTextProfile::parse(name).map(Some).ok_or_else(|| {
             format!(
-                "unknown --server-profile {name} (want seihai-gserver, gserver-v2-seihai, or gserver-v2-beta4)"
+                "unknown --server-profile {name} (want seihai-gserver, seihai-gserver-legacy, gserver-v2-seihai, or gserver-v2-beta4)"
             )
         }),
     }

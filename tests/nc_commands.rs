@@ -882,28 +882,38 @@ fn npc_save_readback_keeps_a_trailing_empty_field() {
 }
 
 /// rc writes and reads NC script text the way the server names itself in its
-/// `Server: ` line (#56): GServer-v2 doubles backslashes inside quoted lines,
-/// seihai-gserver keeps them as sent, so neither gains a backslash per save.
+/// `Server: ` line (#56). Every current server doubles backslashes inside
+/// quoted lines (seihai-gserver since #160); a seihai-gserver from before
+/// that keeps them as sent and is picked with `--server-profile legacy`.
+/// No profile gains a backslash per save.
 #[test]
 fn npc_save_follows_the_servers_text_profile() {
     let script = "echo(\"C:\\tmp\", 1);";
-    let fork_wire: &[u8] = b"\"echo(\"\"C:\\\\tmp\"\", 1);\"";
-    let seihai_wire: &[u8] = b"\"echo(\"\"C:\\tmp\"\", 1);\"";
+    let doubled: &[u8] = b"\"echo(\"\"C:\\\\tmp\"\", 1);\"";
+    let literal: &[u8] = b"\"echo(\"\"C:\\tmp\"\", 1);\"";
     let get = npc_script_get_message(12).unwrap();
     let cases = [
         (
             Some("Server: GServer-v2 (Seihai) 4.0.0-beta"),
+            None,
             ServerTextProfile::GserverV2Seihai,
-            fork_wire,
+            doubled,
         ),
         (
             Some("Server: seihai-gserver 0.9.0"),
+            None,
             ServerTextProfile::SeihaiGserver,
-            seihai_wire,
+            doubled,
         ),
-        (None, ServerTextProfile::SeihaiGserver, seihai_wire),
+        (None, None, ServerTextProfile::SeihaiGserver, doubled),
+        (
+            None,
+            Some("legacy"),
+            ServerTextProfile::SeihaiGserverLegacy,
+            literal,
+        ),
     ];
-    for (banner, profile, wire) in cases {
+    for (banner, flag, profile, wire) in cases {
         let set = npc_script_set_message(profile, 12, script).unwrap();
         assert_eq!(&set[4..], wire, "{banner:?}");
         let greet = banner
@@ -914,7 +924,10 @@ fn npc_save_follows_the_servers_text_profile() {
             messages: vec![parts(&set), parts(&get)],
             reply: vec![npc_script_reply(12, wire)],
         });
-        let output = npc_set(&addr, script);
+        let output = match flag {
+            Some(f) => npc_set_with(&addr, script, &["--server-profile", f]),
+            None => npc_set(&addr, script),
+        };
         assert!(output.status.success(), "{banner:?}: {}", stderr(&output));
         assert_eq!(stdout(&output), "observed NPC script for 12\n");
         assert!(
@@ -927,7 +940,11 @@ fn npc_save_follows_the_servers_text_profile() {
 }
 
 fn npc_set(addr: &str, script: &str) -> Output {
-    cli(&[
+    npc_set_with(addr, script, &[])
+}
+
+fn npc_set_with(addr: &str, script: &str, extra: &[&str]) -> Output {
+    let mut args = vec![
         "nc",
         "npc",
         "set",
@@ -942,7 +959,9 @@ fn npc_set(addr: &str, script: &str) -> Output {
         "200",
         "--timeout",
         "5",
-    ])
+    ];
+    args.extend_from_slice(extra);
+    cli(&args)
 }
 
 #[test]
