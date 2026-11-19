@@ -430,8 +430,8 @@ line. The connect log says which profile was chosen and how.
 
 Before #56's follow-up, rc always wrote the doubled form, so each save to
 seihai-gserver added a backslash. The 2004 RC and RC3 write the doubled
-form too (lab 2026-11-13), which seihai-gserver does not undouble: see
-squirelworks/seihai-gserver issues.
+form too (lab 2026-11-13), which seihai-gserver does not undouble
+(squirelworks/seihai-gserver#160).
 
 Weapon scripts use `0xA7` newlines and are outside this table.
 
