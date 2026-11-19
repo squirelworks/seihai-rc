@@ -135,6 +135,7 @@ Releases for Linux, Windows and macOS are built by GitHub Actions on each `v*`
 tag (or by hand from the Release workflow) as a draft that the owner publishes.
 The notes come from `docs/releases/v<version>.md`, written in a PR first; none
 has been released yet.
+When a release happens, what the version numbers mean and what 1.0.0 needs: [VERSIONING.md](VERSIONING.md).
 
 ## Licence
 
