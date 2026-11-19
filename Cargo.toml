@@ -19,13 +19,13 @@ path = "src/main.rs"
 # The window (`seihai-rc gui`), only with `--features gui`. MIT OR Apache-2.0.
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"], optional = true }
 # Protocol, framing, version profiles and scripting shared with the Seihai client.
-seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.6.3", default-features = false }
+seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.7.0", default-features = false }
 
 [dev-dependencies]
 # The real listserver, for tests/real_listserver.rs. Same licence.
-# Pin a listserver commit that already builds on seihai-core v0.6.3 so this
+# Pin a listserver commit that already builds on seihai-core v0.7.0 so this
 # lock file has one core (squirelworks/seihai-core#79).
-seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "f9517dddd491c8e311a549af83f71898a54886b4" }
+seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "b48e7cdf860486f6cc553138c6d57b72128ad46e" }
 
 # The listserver hashes and checks account passwords with argon2, which is
 # very slow unoptimised.
