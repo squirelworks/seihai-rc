@@ -91,7 +91,19 @@ pub fn gtokenize(lines: &str) -> String {
 /// byte outside 33..126, a comma or a slash; inside quotes `\` and `"` are
 /// doubled. An empty line is an empty item. Unlike [`gtokenize`], a plain
 /// word stays bare: the 2004 RC sent `}` and `labnpcflag=1` unquoted.
+///
+/// This is the GServer-v2 form. Use [`rc_tokenize_for`] when the server is
+/// known: seihai-gserver keeps backslashes as sent, so doubling them there
+/// would double every backslash on each save (#56).
 pub fn rc_tokenize(lines: &[&str]) -> String {
+    rc_tokenize_for(ServerTextProfile::GserverV2Seihai, lines)
+}
+
+/// [`rc_tokenize`] for `profile`: the encoder [`gdetokenize_for`] reverses.
+/// Backslashes inside quotes are doubled only where the profile's server
+/// reads them doubled.
+pub fn rc_tokenize_for(profile: ServerTextProfile, lines: &[&str]) -> String {
+    let double = profile.doubles_quoted_backslashes();
     lines
         .iter()
         .map(|line| {
@@ -100,7 +112,12 @@ pub fn rc_tokenize(lines: &[&str]) -> String {
                     .chars()
                     .any(|c| (c as u32) < 33 || (c as u32) > 126 || c == ',' || c == '/');
             if complex {
-                format!("\"{}\"", line.replace('\\', "\\\\").replace('"', "\"\""))
+                let line = if double {
+                    line.replace('\\', "\\\\")
+                } else {
+                    (*line).to_string()
+                };
+                format!("\"{}\"", line.replace('"', "\"\""))
             } else {
                 (*line).to_string()
             }
@@ -123,9 +140,11 @@ pub enum ServerTextProfile {
     /// GServer-v2 `seihai` branch: backslashes are doubled inside quoted
     /// fields on the wire, so a GET decoder must undouble them.
     GserverV2Seihai,
-    /// GServer-v2 upstream beta4. Encode facts are still open
-    /// (Graal_analysis gap #41); until pinned, decode matches
-    /// [`Self::SeihaiGserver`] so this profile does not invent collapse.
+    /// GServer-v2 upstream beta4. Pinned from its source at `bc54973`
+    /// (2026-11-17): NPC, class and flag text goes out through its CSV
+    /// writer, which quotes a line holding `"`, `,`, `\` or a byte outside
+    /// 32..126 and doubles both `"` and `\` inside the quotes. So it reads
+    /// like [`Self::GserverV2Seihai`] for backslashes.
     GserverV2Beta4,
 }
 
@@ -149,11 +168,41 @@ impl ServerTextProfile {
         }
     }
 
+    /// Whether the server doubles `\` inside quoted fields, both in what
+    /// it sends and in what it expects to read.
+    pub fn doubles_quoted_backslashes(self) -> bool {
+        match self {
+            Self::SeihaiGserver => false,
+            Self::GserverV2Seihai | Self::GserverV2Beta4 => true,
+        }
+    }
+
     /// Whether quoted fields undouble `\\` to `\`.
     pub fn undouble_quoted_backslashes(self) -> bool {
-        match self {
-            Self::SeihaiGserver | Self::GserverV2Beta4 => false,
-            Self::GserverV2Seihai => true,
+        self.doubles_quoted_backslashes()
+    }
+
+    /// The profile a server names in its `Server: ` line (id 74, sent in
+    /// the NC login burst): seihai-gserver sends `Server: seihai-gserver
+    /// VERSION`, the GServer-v2 `seihai` branch `Server: GServer-v2 (Seihai)
+    /// VERSION`. Any other `GServer-v2` or `GS2Emu` name is taken as
+    /// upstream beta4. `None` for any other line.
+    pub fn from_identity(line: &str) -> Option<Self> {
+        let name = line
+            .trim()
+            .strip_prefix("Server:")?
+            .trim()
+            .to_ascii_lowercase();
+        if name.starts_with("seihai-gserver") {
+            Some(Self::SeihaiGserver)
+        } else if name.starts_with("gserver-v2") || name.starts_with("gs2emu") {
+            if name.contains("seihai") {
+                Some(Self::GserverV2Seihai)
+            } else {
+                Some(Self::GserverV2Beta4)
+            }
+        } else {
+            None
         }
     }
 }
@@ -272,10 +321,9 @@ mod tests {
             gdetokenize_for(ServerTextProfile::SeihaiGserver, fork_wire),
             [r#"echo("C:\\tmp", 1);"#]
         );
-        // beta4 encode is still open (gap #41). Until pinned, this profile
-        // keeps literals like seihai-gserver.
+        // beta4 doubles backslashes inside quotes like the fork.
         assert_eq!(
-            gdetokenize_for(ServerTextProfile::GserverV2Beta4, seihai_wire),
+            gdetokenize_for(ServerTextProfile::GserverV2Beta4, fork_wire),
             [logical]
         );
         // Unquoted bare path is never undoubled.
@@ -288,6 +336,53 @@ mod tests {
             Some(ServerTextProfile::GserverV2Seihai)
         );
         assert_eq!(ServerTextProfile::default().as_str(), "seihai-gserver");
+    }
+
+    /// Each profile's encoder is the one its decoder reverses, so a save and
+    /// a read back give the same script (#56). For seihai-gserver the old
+    /// doubled form grew one backslash per save.
+    #[test]
+    fn server_text_profiles_encode_what_they_decode() {
+        let lines = [r#"echo("C:\tmp", 1);"#, "}", r#"x = "a\\b";"#, ""];
+        for p in [
+            ServerTextProfile::SeihaiGserver,
+            ServerTextProfile::GserverV2Seihai,
+            ServerTextProfile::GserverV2Beta4,
+        ] {
+            assert_eq!(
+                gdetokenize_for(p, &rc_tokenize_for(p, &lines)),
+                lines,
+                "{p}"
+            );
+        }
+        assert_eq!(
+            rc_tokenize_for(ServerTextProfile::SeihaiGserver, &[r#"a\b c"#]),
+            r#""a\b c""#
+        );
+        assert_eq!(
+            rc_tokenize_for(ServerTextProfile::GserverV2Seihai, &[r#"a\b c"#]),
+            r#""a\\b c""#
+        );
+        assert_eq!(rc_tokenize(&[r#"a\b c"#]), r#""a\\b c""#);
+    }
+
+    #[test]
+    fn server_text_profile_from_identity() {
+        use ServerTextProfile as P;
+        assert_eq!(
+            P::from_identity("Server: seihai-gserver 0.9.0"),
+            Some(P::SeihaiGserver)
+        );
+        assert_eq!(
+            P::from_identity("Server: GServer-v2 (Seihai) 4.0.0-beta"),
+            Some(P::GserverV2Seihai)
+        );
+        assert_eq!(
+            P::from_identity("Server: GS2Emu 4.0.0-beta"),
+            Some(P::GserverV2Beta4)
+        );
+        assert_eq!(P::from_identity("New NC: labnc"), None);
+        assert_eq!(P::from_identity("Server: something else"), None);
     }
 
     #[test]

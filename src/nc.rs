@@ -19,7 +19,7 @@ use seihai_core::protocol::{read_gint3, Message};
 use crate::link::{Codec, Link};
 use crate::rc::LoginError;
 use crate::wire::{
-    gchar, gdetokenize_for, latin1_bytes, message, push_gint3, push_gstring, rc_tokenize,
+    gchar, gdetokenize_for, latin1_bytes, message, push_gint3, push_gstring, rc_tokenize_for,
     read_gstring, text, ServerTextProfile,
 };
 
@@ -177,14 +177,14 @@ fn no_line_break(what: &'static str, value: &str) -> Result<(), NcError> {
 /// 2026-11-13): tokenized, one item per line, quoted when needed, so a line
 /// break never reaches the wire. A carriage return before a line feed is
 /// dropped; a final line feed adds no empty item.
-fn tokenized_script(script: &str) -> Vec<u8> {
+fn tokenized_script(profile: ServerTextProfile, script: &str) -> Vec<u8> {
     let script = script.replace("\r\n", "\n");
     let body = script.strip_suffix('\n').unwrap_or(&script);
     if body.is_empty() {
         return Vec::new();
     }
     let lines: Vec<&str> = body.split('\n').collect();
-    latin1_bytes(&rc_tokenize(&lines))
+    latin1_bytes(&rc_tokenize_for(profile, &lines))
 }
 
 /// The weapon-script line separator: 0xA7, Latin-1 `§`.
@@ -222,7 +222,7 @@ pub fn representable_npc_class_script(script: &str) -> String {
 
 /// [`representable_npc_class_script`] for an explicit server text profile.
 pub fn representable_npc_class_script_for(profile: ServerTextProfile, script: &str) -> String {
-    detokenized_for(profile, &tokenized_script(script))
+    detokenized_for(profile, &tokenized_script(profile, script))
 }
 
 /// The weapon script a later get can show for `script`.
@@ -297,14 +297,18 @@ pub fn npc_flags_get_message(id: u32) -> Result<Vec<u8>, NcError> {
 
 /// Id 110: GINT3 id, then the flags tokenized, one per item (the 2004 RC:
 /// `labnpcflag=1,"other.flag=a b"`).
-pub fn npc_flags_set_message(id: u32, flags: &[String]) -> Result<Vec<u8>, NcError> {
+pub fn npc_flags_set_message(
+    profile: ServerTextProfile,
+    id: u32,
+    flags: &[String],
+) -> Result<Vec<u8>, NcError> {
     check_id(id)?;
     for f in flags {
         no_line_break("flag", f)?;
     }
     let mut payload = gint3(id);
     let lines: Vec<&str> = flags.iter().map(String::as_str).collect();
-    payload.extend(latin1_bytes(&rc_tokenize(&lines)));
+    payload.extend(latin1_bytes(&rc_tokenize_for(profile, &lines)));
     Ok(message(NC_NPC_FLAGS_SET, &payload))
 }
 
@@ -323,7 +327,7 @@ pub struct NewNpc {
 /// Id 111: `name,id,type,scripter,level,x,y` tokenized (the 2004 RC:
 /// `labnpc,1001,OBJECT,labrc,npcdemo_start.nw,20,25`). The fork answers
 /// with 158 for the new NPC.
-pub fn npc_add_message(n: &NewNpc) -> Result<Vec<u8>, NcError> {
+pub fn npc_add_message(profile: ServerTextProfile, n: &NewNpc) -> Result<Vec<u8>, NcError> {
     check_id(n.id)?;
     let id = n.id.to_string();
     let items = [&n.name, &id, &n.kind, &n.scripter, &n.level, &n.x, &n.y];
@@ -334,7 +338,10 @@ pub fn npc_add_message(n: &NewNpc) -> Result<Vec<u8>, NcError> {
         no_line_break(what, v)?;
     }
     let joined: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
-    Ok(message(NC_NPC_ADD, &latin1_bytes(&rc_tokenize(&joined))))
+    Ok(message(
+        NC_NPC_ADD,
+        &latin1_bytes(&rc_tokenize_for(profile, &joined)),
+    ))
 }
 
 /// Id 106: GINT3 id.
@@ -344,10 +351,14 @@ pub fn npc_script_get_message(id: u32) -> Result<Vec<u8>, NcError> {
 }
 
 /// Id 109: GINT3 id, then the script tokenized (see [`tokenized_script`]).
-pub fn npc_script_set_message(id: u32, script: &str) -> Result<Vec<u8>, NcError> {
+pub fn npc_script_set_message(
+    profile: ServerTextProfile,
+    id: u32,
+    script: &str,
+) -> Result<Vec<u8>, NcError> {
     check_id(id)?;
     let mut payload = gint3(id);
-    payload.extend(tokenized_script(script));
+    payload.extend(tokenized_script(profile, script));
     Ok(message(NC_NPC_SCRIPT_SET, &payload))
 }
 
@@ -360,10 +371,14 @@ pub fn class_get_message(name: &str) -> Result<Vec<u8>, NcError> {
 
 /// Id 113: GSTRING name, then the script tokenized (see
 /// [`tokenized_script`]; the 2004 RC doubled the quotes inside a line).
-pub fn class_set_message(name: &str, script: &str) -> Result<Vec<u8>, NcError> {
+pub fn class_set_message(
+    profile: ServerTextProfile,
+    name: &str,
+    script: &str,
+) -> Result<Vec<u8>, NcError> {
     let mut payload = Vec::new();
     push_gstring(&mut payload, &gstring_bytes("class name", name)?);
-    payload.extend(tokenized_script(script));
+    payload.extend(tokenized_script(profile, script));
     Ok(message(NC_CLASS_SET, &payload))
 }
 
@@ -862,28 +877,28 @@ pub struct NcSession {
     pub lists: NcLists,
     /// How tokenized replies from this peer are decoded.
     profile: ServerTextProfile,
+    /// Whether `profile` came from the server's `Server: ` line, or from the
+    /// caller (then it is never changed by what the server says).
+    profile_fixed: bool,
+    detected: bool,
 }
 
 impl NcSession {
     /// Connect and send the type-3 login. Returns as soon as that frame is
-    /// written. Call [`Self::peek`] to catch an immediate refusal. Uses the
-    /// default seihai-gserver text profile.
+    /// written. Call [`Self::peek`] to catch an immediate refusal. The text
+    /// profile starts as seihai-gserver and follows the server's `Server: `
+    /// line when it sends one (#56).
     pub fn connect(
         addr: &str,
         account: &str,
         password: &str,
         timeout: Duration,
     ) -> Result<Self, LoginError> {
-        Self::connect_with_profile(
-            addr,
-            account,
-            password,
-            timeout,
-            ServerTextProfile::default(),
-        )
+        Self::connect_profile(addr, account, password, timeout, None)
     }
 
-    /// [`Self::connect`] with an explicit server text profile.
+    /// [`Self::connect`] with an explicit server text profile, kept whatever
+    /// the server says.
     pub fn connect_with_profile(
         addr: &str,
         account: &str,
@@ -891,13 +906,26 @@ impl NcSession {
         timeout: Duration,
         profile: ServerTextProfile,
     ) -> Result<Self, LoginError> {
+        Self::connect_profile(addr, account, password, timeout, Some(profile))
+    }
+
+    /// [`Self::connect`] with `Some` fixed profile or `None` to detect it.
+    pub fn connect_profile(
+        addr: &str,
+        account: &str,
+        password: &str,
+        timeout: Duration,
+        profile: Option<ServerTextProfile>,
+    ) -> Result<Self, LoginError> {
         let mut link = Link::connect(addr, timeout)?;
         link.send_login(&login_body(account, password), Codec::Plain)?;
         Ok(Self {
             link,
             pending: Vec::new(),
             lists: NcLists::default(),
-            profile,
+            profile: profile.unwrap_or_default(),
+            profile_fixed: profile.is_some(),
+            detected: false,
         })
     }
 
@@ -906,9 +934,32 @@ impl NcSession {
         self.profile
     }
 
+    /// How the profile was chosen, for the connect log.
+    pub fn profile_source(&self) -> &'static str {
+        if self.profile_fixed {
+            "--server-profile"
+        } else if self.detected {
+            "from the server's Server: line"
+        } else {
+            "default, the server did not name itself"
+        }
+    }
+
     /// Override the text profile (manual testing / after auto-detect).
     pub fn set_server_profile(&mut self, profile: ServerTextProfile) {
         self.profile = profile;
+        self.profile_fixed = true;
+    }
+
+    /// Read a `Server: ` line (id 74) and switch profile, unless fixed.
+    fn detect_profile(&mut self, m: &Message) {
+        if self.profile_fixed || m.id != NC_RC_CHAT {
+            return;
+        }
+        if let Some(p) = ServerTextProfile::from_identity(&text(&m.payload)) {
+            self.profile = p;
+            self.detected = true;
+        }
     }
 
     /// Read one frame, if one arrives before `deadline`. A disconnect message
@@ -929,6 +980,7 @@ impl NcSession {
     }
 
     fn push_parsed(&mut self, m: &Message) -> Result<(), LoginError> {
+        self.detect_profile(m);
         match parse_event_for(self.profile, m) {
             NcEvent::Disconnect(why) => Err(LoginError::Refused(why)),
             ev => {
@@ -945,20 +997,14 @@ impl NcSession {
     /// There is no separate accept packet in the notes, so a link that stays
     /// open counts as accepted. A disconnect message, or a link that closes
     /// before `timeout`, is a refusal. Any other traffic returns at once so
-    /// the caller can read it. Uses the default seihai-gserver text profile.
+    /// the caller can read it. The text profile follows the server's `Server: ` line, as in [`Self::connect`].
     pub fn login(
         addr: &str,
         account: &str,
         password: &str,
         timeout: Duration,
     ) -> Result<Self, LoginError> {
-        Self::login_with_profile(
-            addr,
-            account,
-            password,
-            timeout,
-            ServerTextProfile::default(),
-        )
+        Self::login_profile(addr, account, password, timeout, None)
     }
 
     /// [`Self::login`] with an explicit server text profile.
@@ -969,8 +1015,19 @@ impl NcSession {
         timeout: Duration,
         profile: ServerTextProfile,
     ) -> Result<Self, LoginError> {
+        Self::login_profile(addr, account, password, timeout, Some(profile))
+    }
+
+    /// [`Self::login`] with `Some` fixed profile or `None` to detect it.
+    pub fn login_profile(
+        addr: &str,
+        account: &str,
+        password: &str,
+        timeout: Duration,
+        profile: Option<ServerTextProfile>,
+    ) -> Result<Self, LoginError> {
         let deadline = Instant::now() + timeout;
-        let mut s = Self::connect_with_profile(addr, account, password, timeout, profile)?;
+        let mut s = Self::connect_profile(addr, account, password, timeout, profile)?;
         loop {
             let Some(msgs) = s.link.recv(deadline)? else {
                 return if s.link.is_closed() {
@@ -1001,6 +1058,7 @@ impl NcSession {
                 return Ok(None);
             };
             for m in &msgs {
+                self.detect_profile(m);
                 let ev = parse_event_for(self.profile, m);
                 self.lists.apply(&ev);
                 self.pending.push(ev);
@@ -1042,6 +1100,7 @@ impl NcSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::rc_tokenize;
 
     #[test]
     fn login_body_is_type_3_token_and_two_strings() {
@@ -1128,7 +1187,8 @@ mod tests {
 
     #[test]
     fn class_delete_uses_the_class_set_string() {
-        let set = class_set_message("Guard", "return;").unwrap();
+        let set =
+            class_set_message(ServerTextProfile::GserverV2Seihai, "Guard", "return;").unwrap();
         let delete = class_delete_message("Guard").unwrap();
         assert_eq!(delete[0], gchar(NC_CLASS_DELETE));
         // The bare name, as the fork reads it; not the GSTRING class set writes.
@@ -1141,6 +1201,7 @@ mod tests {
     fn scripts_with_line_breaks_match_the_2004_rc() {
         // 109 for NPC 1001 (`20 27 89`), lab 2026-11-13.
         let set = npc_script_set_message(
+            ServerTextProfile::GserverV2Seihai,
             1001,
             "// lab npc script\r\nif (created) {\r\n  this.lab = 1;\r\n}\r\n",
         )
@@ -1151,6 +1212,7 @@ mod tests {
         );
         // 113: GSTRING name, then the lines tokenized, quotes doubled.
         let class = class_set_message(
+            ServerTextProfile::GserverV2Seihai,
             "labclass",
             "// lab class\nfunction onCreated() {\n  echo(\"lab, class\");\n}\n",
         )
@@ -1219,7 +1281,8 @@ mod tests {
             Some(("Guard".into(), script.into()))
         );
         // Saving intentionally omits one final LF, not every trailing empty line.
-        let saved = npc_script_set_message(1001, script).unwrap();
+        let saved =
+            npc_script_set_message(ServerTextProfile::GserverV2Seihai, 1001, script).unwrap();
         assert_eq!(
             parse_npc_script(&saved[1..]),
             Some((1001, script.strip_suffix('\n').unwrap().into()))
@@ -1228,15 +1291,18 @@ mod tests {
 
     #[test]
     fn npc_add_warp_and_flags_match_the_2004_rc() {
-        let add = npc_add_message(&NewNpc {
-            name: "labnpc".into(),
-            id: 1001,
-            kind: "OBJECT".into(),
-            scripter: "labrc".into(),
-            level: "npcdemo_start.nw".into(),
-            x: "20".into(),
-            y: "25".into(),
-        })
+        let add = npc_add_message(
+            ServerTextProfile::GserverV2Seihai,
+            &NewNpc {
+                name: "labnpc".into(),
+                id: 1001,
+                kind: "OBJECT".into(),
+                scripter: "labrc".into(),
+                level: "npcdemo_start.nw".into(),
+                x: "20".into(),
+                y: "25".into(),
+            },
+        )
         .unwrap();
         assert_eq!(add, b"\x8flabnpc,1001,OBJECT,labrc,npcdemo_start.nw,20,25");
         assert_eq!(
@@ -1245,7 +1311,12 @@ mod tests {
         );
         assert!(npc_warp_message(1001, 12.25, 14.0, "x").is_err());
         assert_eq!(
-            npc_flags_set_message(1001, &["labnpcflag=1".into(), "other.flag=a b".into()]).unwrap(),
+            npc_flags_set_message(
+                ServerTextProfile::GserverV2Seihai,
+                1001,
+                &["labnpcflag=1".into(), "other.flag=a b".into()]
+            )
+            .unwrap(),
             b"\x8e \x27\x89labnpcflag=1,\"other.flag=a b\""
         );
         assert_eq!(npc_reset_message(1001).unwrap(), b"\x89 \x27\x89");
@@ -1303,10 +1374,14 @@ mod tests {
         let class_get = class_get_message("Guard").unwrap();
         assert_eq!(class_get[0], gchar(NC_CLASS_GET));
         assert_eq!(&class_get[1..], b"Guard");
-        let set = class_set_message("Guard", "return;").unwrap();
+        let set =
+            class_set_message(ServerTextProfile::GserverV2Seihai, "Guard", "return;").unwrap();
         assert_eq!(set[0], gchar(NC_CLASS_SET));
         assert_eq!(&set[1..], b"%Guardreturn;");
-        assert_eq!(class_set_message("Guard", "").unwrap(), b"\x91%Guard");
+        assert_eq!(
+            class_set_message(ServerTextProfile::GserverV2Seihai, "Guard", "").unwrap(),
+            b"\x91%Guard"
+        );
         let weapon_get = weapon_get_message("sword").unwrap();
         assert_eq!(&weapon_get[1..], b"sword");
         let delete = weapon_delete_message("sword").unwrap();

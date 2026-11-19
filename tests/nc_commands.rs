@@ -15,10 +15,10 @@ use seihai_rc::nc::{
     representable_npc_class_script, weapon_delete_message, weapon_get_message, weapon_list_message,
     weapon_set_message, NcSession, NC_CLASS_DELETE, NC_CLASS_DELETE_NOTIFY, NC_CLASS_GET,
     NC_CLASS_NAME, NC_CLASS_SCRIPT, NC_NPC_ATTRIBUTES, NC_NPC_REMOVED, NC_NPC_ROW, NC_NPC_SCRIPT,
-    NC_WEAPON_NAMES, NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
+    NC_RC_CHAT, NC_WEAPON_NAMES, NC_WEAPON_SCRIPT, NPC_PROP_LEVEL, NPC_PROP_NAME, NPC_PROP_TYPE,
 };
 use seihai_rc::rc::{discover_npc_servers, LoginParams, RcKind};
-use seihai_rc::wire::{gchar, message, push_gint3, push_gshort, push_gstring};
+use seihai_rc::wire::{gchar, message, push_gint3, push_gshort, push_gstring, ServerTextProfile};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const QUIET: Duration = Duration::from_millis(200);
@@ -144,6 +144,12 @@ enum NcPlan {
         messages: Vec<(u8, Vec<u8>)>,
         reply: Vec<Vec<u8>>,
     },
+    /// Send `greet` after the login, then as [`NcPlan::Expect`].
+    GreetExpect {
+        greet: Vec<Vec<u8>>,
+        messages: Vec<(u8, Vec<u8>)>,
+        reply: Vec<Vec<u8>>,
+    },
 }
 
 fn parts(msg: &[u8]) -> (u8, Vec<u8>) {
@@ -179,17 +185,15 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
                 }
             }
             NcPlan::Expect { messages, reply } => {
-                let frame = read_raw_frame(&mut stream).expect("request frame");
-                let msgs = split_messages(&codec.decode(&frame).unwrap());
-                assert_eq!(msgs.len(), messages.len(), "{msgs:?}");
-                for (msg, (id, payload)) in msgs.iter().zip(&messages) {
-                    assert_eq!(msg.id, *id, "{msgs:?}");
-                    assert_eq!(&msg.payload, payload);
-                }
-                seen = msgs;
-                if !reply.is_empty() {
-                    send_msgs(&mut stream, &mut codec, &reply);
-                }
+                seen = expect_frame(&mut stream, &mut codec, &messages, &reply);
+            }
+            NcPlan::GreetExpect {
+                greet,
+                messages,
+                reply,
+            } => {
+                send_msgs(&mut stream, &mut codec, &greet);
+                seen = expect_frame(&mut stream, &mut codec, &messages, &reply);
             }
         }
         let mut rest = Vec::new();
@@ -197,6 +201,26 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
         seen
     });
     (addr, handle)
+}
+
+/// Read one frame, require `messages` in order, then send `reply`.
+fn expect_frame(
+    stream: &mut TcpStream,
+    codec: &mut Codec,
+    messages: &[(u8, Vec<u8>)],
+    reply: &[Vec<u8>],
+) -> Vec<Message> {
+    let frame = read_raw_frame(stream).expect("request frame");
+    let msgs = split_messages(&codec.decode(&frame).unwrap());
+    assert_eq!(msgs.len(), messages.len(), "{msgs:?}");
+    for (msg, (id, payload)) in msgs.iter().zip(messages) {
+        assert_eq!(msg.id, *id, "{msgs:?}");
+        assert_eq!(&msg.payload, payload);
+    }
+    if !reply.is_empty() {
+        send_msgs(stream, codec, reply);
+    }
+    msgs
 }
 
 fn params(kind: RcKind) -> LoginParams {
@@ -438,7 +462,7 @@ fn npc_get_set_delete_and_script_round_trip() {
         npc_script_get_message(12).unwrap()[1..]
     );
 
-    let set = npc_script_set_message(12, "return;").unwrap();
+    let set = npc_script_set_message(ServerTextProfile::default(), 12, "return;").unwrap();
     let get = npc_script_get_message(12).unwrap();
     let (addr, handle) = fake_nc(NcPlan::Expect {
         messages: vec![parts(&set), parts(&get)],
@@ -539,7 +563,8 @@ fn class_list_get_set_and_delete() {
     assert_eq!(stdout(&output), "return;\n");
     handle.join().unwrap();
 
-    let set = seihai_rc::nc::class_set_message("Guard", "return;").unwrap();
+    let set =
+        seihai_rc::nc::class_set_message(ServerTextProfile::default(), "Guard", "return;").unwrap();
     let get = seihai_rc::nc::class_get_message("Guard").unwrap();
     let (addr, handle) = fake_nc(NcPlan::Expect {
         messages: vec![parts(&set), parts(&get)],
@@ -750,6 +775,7 @@ fn a_script_with_line_breaks_goes_tokenized() {
     )
     .unwrap();
     let set = npc_script_set_message(
+        ServerTextProfile::default(),
         12,
         "// lab npc script\nif (created) {\n  this.lab = 1;\n}\n",
     )
@@ -808,7 +834,7 @@ fn npc_save_readback_keeps_a_trailing_empty_field() {
     let script = "lab line\n\n";
     let expected = representable_npc_class_script(script);
     assert_eq!(expected, "lab line\n");
-    let set = npc_script_set_message(12, script).unwrap();
+    let set = npc_script_set_message(ServerTextProfile::default(), 12, script).unwrap();
     let get = npc_script_get_message(12).unwrap();
     let messages = vec![parts(&set), parts(&get)];
     let quoted_match = b"\"lab line\",\"\"";
@@ -855,6 +881,51 @@ fn npc_save_readback_keeps_a_trailing_empty_field() {
     handle.join().unwrap();
 }
 
+/// rc writes and reads NC script text the way the server names itself in its
+/// `Server: ` line (#56): GServer-v2 doubles backslashes inside quoted lines,
+/// seihai-gserver keeps them as sent, so neither gains a backslash per save.
+#[test]
+fn npc_save_follows_the_servers_text_profile() {
+    let script = "echo(\"C:\\tmp\", 1);";
+    let fork_wire: &[u8] = b"\"echo(\"\"C:\\\\tmp\"\", 1);\"";
+    let seihai_wire: &[u8] = b"\"echo(\"\"C:\\tmp\"\", 1);\"";
+    let get = npc_script_get_message(12).unwrap();
+    let cases = [
+        (
+            Some("Server: GServer-v2 (Seihai) 4.0.0-beta"),
+            ServerTextProfile::GserverV2Seihai,
+            fork_wire,
+        ),
+        (
+            Some("Server: seihai-gserver 0.9.0"),
+            ServerTextProfile::SeihaiGserver,
+            seihai_wire,
+        ),
+        (None, ServerTextProfile::SeihaiGserver, seihai_wire),
+    ];
+    for (banner, profile, wire) in cases {
+        let set = npc_script_set_message(profile, 12, script).unwrap();
+        assert_eq!(&set[4..], wire, "{banner:?}");
+        let greet = banner
+            .map(|b| vec![message(NC_RC_CHAT, b.as_bytes())])
+            .unwrap_or_default();
+        let (addr, handle) = fake_nc(NcPlan::GreetExpect {
+            greet,
+            messages: vec![parts(&set), parts(&get)],
+            reply: vec![npc_script_reply(12, wire)],
+        });
+        let output = npc_set(&addr, script);
+        assert!(output.status.success(), "{banner:?}: {}", stderr(&output));
+        assert_eq!(stdout(&output), "observed NPC script for 12\n");
+        assert!(
+            stderr(&output).contains(&format!("server text profile {profile}")),
+            "{}",
+            stderr(&output)
+        );
+        handle.join().unwrap();
+    }
+}
+
 fn npc_set(addr: &str, script: &str) -> Output {
     cli(&[
         "nc",
@@ -876,7 +947,7 @@ fn npc_set(addr: &str, script: &str) -> Output {
 
 #[test]
 fn npc_set_readback_distinguishes_the_outcomes() {
-    let set = npc_script_set_message(12, "return;").unwrap();
+    let set = npc_script_set_message(ServerTextProfile::default(), 12, "return;").unwrap();
     let get = npc_script_get_message(12).unwrap();
     let messages = vec![parts(&set), parts(&get)];
 

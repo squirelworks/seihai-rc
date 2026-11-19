@@ -251,11 +251,12 @@ OPTIONS:
                        and password go sealed. Needs --server-key.
   --server-key KEY     The listserver's Ed25519 public key, unpadded
                        base64. The password is not sent if it does not match.
-  --server-profile P   How to decode tokenized text from the peer:
-                       seihai-gserver (default; also used for unknown),
-                       gserver-v2-seihai (fork doubles quoted backslashes),
-                       gserver-v2-beta4 (provisional; same decode as
-                       seihai-gserver until upstream encode is pinned).
+  --server-profile P   How tokenized NC text is written and read for the
+                       peer. Without it, rc takes the profile from the
+                       server's Server: line, or seihai-gserver when there
+                       is none. seihai-gserver (backslashes as sent),
+                       gserver-v2-seihai or gserver-v2-beta4 (both double
+                       backslashes inside quoted lines).
   --out FILE           files get: write the file here (default stdout).
   --tsv                players list, rcs list and nc npcs: tab-separated, with a header.
   --json               players list and rcs list: one JSON array.
@@ -652,11 +653,13 @@ fn cmd_nc_login(o: &Opts) -> Result<(), String> {
         .clone()
         .ok_or("nc login needs --server HOST:PORT")?;
     let profile = server_profile(o)?;
-    let mut s = NcSession::login_with_profile(&addr, &c.account, &c.password, c.timeout, profile)
+    let mut s = NcSession::login_profile(&addr, &c.account, &c.password, c.timeout, profile)
         .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
     eprintln!(
-        "connected to {addr} as {} (NPC Control; server text profile {profile})",
-        c.account
+        "connected to {addr} as {} (NPC Control; server text profile {}, {})",
+        c.account,
+        s.server_profile(),
+        s.profile_source()
     );
     let secs = o.for_secs.unwrap_or(5);
     let deadline = if secs == 0 {
@@ -1784,10 +1787,12 @@ fn one_npc_endpoint(found: &[NpcServerFound]) -> Result<String, String> {
     Err(msg)
 }
 
-fn server_profile(o: &Opts) -> Result<ServerTextProfile, String> {
+/// `Some` profile from `--server-profile`, or `None` to take it from the
+/// server's `Server: ` line (seihai-gserver when it sends none).
+fn server_profile(o: &Opts) -> Result<Option<ServerTextProfile>, String> {
     match &o.server_profile {
-        None => Ok(ServerTextProfile::default()),
-        Some(name) => ServerTextProfile::parse(name).ok_or_else(|| {
+        None => Ok(None),
+        Some(name) => ServerTextProfile::parse(name).map(Some).ok_or_else(|| {
             format!(
                 "unknown --server-profile {name} (want seihai-gserver, gserver-v2-seihai, or gserver-v2-beta4)"
             )
@@ -1799,15 +1804,17 @@ fn connect_nc(o: &Opts, c: &Common) -> Result<NcSession, String> {
     let addr = nc_address(o, c)?;
     let profile = server_profile(o)?;
     let mut session =
-        NcSession::connect_with_profile(&addr, &c.account, &c.password, c.timeout, profile)
+        NcSession::connect_profile(&addr, &c.account, &c.password, c.timeout, profile)
             .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
     let peek = Duration::from_millis(200).min(c.timeout);
     session
         .peek(Instant::now() + peek)
         .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
     eprintln!(
-        "connected to {addr} as {} (NPC Control; server text profile {profile})",
-        c.account
+        "connected to {addr} as {} (NPC Control; server text profile {}, {})",
+        c.account,
+        session.server_profile(),
+        session.profile_source()
     );
     Ok(session)
 }
@@ -2031,10 +2038,13 @@ fn read_script_back(
 fn cmd_nc_npc_set(o: &Opts, id_text: &str) -> Result<(), String> {
     let id = parse_npc_id(id_text)?;
     let script = load_script(o)?;
-    let set_msg = npc_script_set_message(id, &script).map_err(|e| e.to_string())?;
+    // Checked before connecting; built again below with the server's profile.
+    npc_script_set_message(ServerTextProfile::default(), id, &script).map_err(|e| e.to_string())?;
     let get_msg = npc_script_get_message(id).map_err(|e| e.to_string())?;
     let c = common(o)?;
     let session = connect_nc(o, &c)?;
+    let set_msg =
+        npc_script_set_message(session.server_profile(), id, &script).map_err(|e| e.to_string())?;
     let expected = representable_npc_class_script_for(session.server_profile(), &script);
     read_script_back(
         session,
@@ -2080,7 +2090,7 @@ fn cmd_nc_npc_add(
 ) -> Result<(), String> {
     let id = parse_npc_id(id_text)?;
     let c = common(o)?;
-    let msg = npc_add_message(&NewNpc {
+    let npc = NewNpc {
         name: name.to_string(),
         id,
         kind: kind.to_string(),
@@ -2088,9 +2098,10 @@ fn cmd_nc_npc_add(
         level: level.to_string(),
         x: x.to_string(),
         y: y.to_string(),
-    })
-    .map_err(|e| e.to_string())?;
+    };
+    npc_add_message(ServerTextProfile::default(), &npc).map_err(|e| e.to_string())?;
     let mut session = connect_nc(o, &c)?;
+    let msg = npc_add_message(session.server_profile(), &npc).map_err(|e| e.to_string())?;
     session.send(&[msg]).map_err(|e| e.to_string())?;
     let events = settle_nc(&mut session, o, &c)?;
     if events
@@ -2160,13 +2171,21 @@ fn cmd_nc_npc_flags(o: &Opts, id_text: &str) -> Result<(), String> {
             .filter(|l| !l.is_empty())
             .collect()
     });
-    let set_msg = match &new {
-        Some(flags) => Some(npc_flags_set_message(id, flags).map_err(|e| e.to_string())?),
-        None => None,
-    };
+    if let Some(flags) = &new {
+        // Checked before connecting; built again below with the server's profile.
+        npc_flags_set_message(ServerTextProfile::default(), id, flags)
+            .map_err(|e| e.to_string())?;
+    }
     let get_msg = npc_flags_get_message(id).map_err(|e| e.to_string())?;
     let c = common(o)?;
     let mut session = connect_nc(o, &c)?;
+    let set_msg = match &new {
+        Some(flags) => Some(
+            npc_flags_set_message(session.server_profile(), id, flags)
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
     session
         .send(std::slice::from_ref(&get_msg))
         .map_err(|e| e.to_string())?;
@@ -2243,10 +2262,13 @@ fn cmd_nc_class_get(o: &Opts, name: &str) -> Result<(), String> {
 
 fn cmd_nc_class_set(o: &Opts, name: &str) -> Result<(), String> {
     let script = load_script(o)?;
-    let set_msg = class_set_message(name, &script).map_err(|e| e.to_string())?;
+    // Checked before connecting; built again below with the server's profile.
+    class_set_message(ServerTextProfile::default(), name, &script).map_err(|e| e.to_string())?;
     let get_msg = class_get_message(name).map_err(|e| e.to_string())?;
     let c = common(o)?;
     let session = connect_nc(o, &c)?;
+    let set_msg =
+        class_set_message(session.server_profile(), name, &script).map_err(|e| e.to_string())?;
     let expected = representable_npc_class_script_for(session.server_profile(), &script);
     read_script_back(
         session,

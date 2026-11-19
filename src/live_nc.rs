@@ -69,17 +69,17 @@ pub enum NcUpdate {
 pub type Encoded = Result<(Vec<Vec<u8>>, String), NcError>;
 
 /// The bytes for a command and the log line for it; `None` for quit.
-pub fn encode(c: &NcCommand) -> Option<Encoded> {
+pub fn encode(profile: ServerTextProfile, c: &NcCommand) -> Option<Encoded> {
     let one = |m: Result<Vec<u8>, NcError>, note: String| m.map(|m| (vec![m], note));
     Some(match c {
         NcCommand::NpcAttributes(id) => one(npc_get_message(*id), String::new()),
         NcCommand::NpcScript(id) => one(npc_script_get_message(*id), String::new()),
-        NcCommand::NpcScriptSet { id, script } => npc_script_set_message(*id, script)
+        NcCommand::NpcScriptSet { id, script } => npc_script_set_message(profile, *id, script)
             .and_then(|set| npc_script_get_message(*id).map(|get| (vec![set, get], String::new()))),
         NcCommand::NpcDelete(id) => one(npc_delete_message(*id), format!("deleted NPC {id}")),
         NcCommand::NpcReset(id) => one(npc_reset_message(*id), format!("reset NPC {id}")),
         NcCommand::ClassGet(name) => one(class_get_message(name), String::new()),
-        NcCommand::ClassSet { name, script } => class_set_message(name, script)
+        NcCommand::ClassSet { name, script } => class_set_message(profile, name, script)
             .and_then(|set| class_get_message(name).map(|get| (vec![set, get], String::new()))),
         NcCommand::ClassDelete(name) => {
             one(class_delete_message(name), format!("deleted class {name}"))
@@ -113,25 +113,20 @@ pub struct LiveNc {
 
 impl LiveNc {
     /// Log in to the NPC-server at `addr` on a new thread, then ask for the
-    /// weapon list (the NPCs and classes come by themselves). Uses the
-    /// default seihai-gserver text profile.
+    /// weapon list (the NPCs and classes come by themselves). The text
+    /// profile follows the server's `Server: ` line (see [`NcSession::connect`]).
     pub fn start(addr: String, account: String, password: String, timeout: Duration) -> Self {
-        Self::start_with_profile(
-            addr,
-            account,
-            password,
-            timeout,
-            ServerTextProfile::default(),
-        )
+        Self::start_with_profile(addr, account, password, timeout, None)
     }
 
-    /// [`Self::start`] with an explicit server text profile.
+    /// [`Self::start`] with `Some` fixed server text profile, or `None` to
+    /// detect it.
     pub fn start_with_profile(
         addr: String,
         account: String,
         password: String,
         timeout: Duration,
-        profile: ServerTextProfile,
+        profile: Option<ServerTextProfile>,
     ) -> Self {
         let (ctx, crx) = mpsc::channel();
         let (utx, urx) = mpsc::channel();
@@ -366,11 +361,11 @@ fn run(
     account: String,
     password: String,
     timeout: Duration,
-    profile: ServerTextProfile,
+    profile: Option<ServerTextProfile>,
     commands: Receiver<NcCommand>,
     updates: Sender<NcUpdate>,
 ) {
-    let mut s = match NcSession::login_with_profile(&addr, &account, &password, timeout, profile) {
+    let mut s = match NcSession::login_profile(&addr, &account, &password, timeout, profile) {
         Ok(s) => s,
         Err(e) => {
             let _ = updates.send(NcUpdate::LoginFailed(format!("{addr}: {e}")));
@@ -379,7 +374,9 @@ fn run(
     };
     if updates
         .send(NcUpdate::Connected(format!(
-            "{addr} (server text profile {profile})"
+            "{addr} (server text profile {}, {})",
+            s.server_profile(),
+            s.profile_source()
         )))
         .is_err()
     {
@@ -397,7 +394,7 @@ fn run(
         }
         loop {
             match commands.try_recv() {
-                Ok(c) => match encode(&c) {
+                Ok(c) => match encode(s.server_profile(), &c) {
                     None => quit = true,
                     Some(Err(e)) => {
                         let _ = updates.send(NcUpdate::Error(e.to_string()));
@@ -586,34 +583,43 @@ mod tests {
 
     #[test]
     fn weapon_set_asks_for_the_list_again() {
-        let (msgs, note) = encode(&NcCommand::WeaponSet {
-            name: "bomb".into(),
-            image: "wbomb1.png".into(),
-            script: "a".into(),
-        })
+        let (msgs, note) = encode(
+            ServerTextProfile::default(),
+            &NcCommand::WeaponSet {
+                name: "bomb".into(),
+                image: "wbomb1.png".into(),
+                script: "a".into(),
+            },
+        )
         .unwrap()
         .unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1], weapon_get_message("bomb").unwrap());
         assert_eq!(msgs[2], weapon_list_message());
         assert!(note.is_empty());
-        let (npc, npc_note) = encode(&NcCommand::NpcScriptSet {
-            id: 12,
-            script: "return;".into(),
-        })
+        let (npc, npc_note) = encode(
+            ServerTextProfile::default(),
+            &NcCommand::NpcScriptSet {
+                id: 12,
+                script: "return;".into(),
+            },
+        )
         .unwrap()
         .unwrap();
         assert!(npc_note.is_empty());
         assert_eq!(npc[1], npc_script_get_message(12).unwrap());
-        let (class, class_note) = encode(&NcCommand::ClassSet {
-            name: "Guard".into(),
-            script: "return;".into(),
-        })
+        let (class, class_note) = encode(
+            ServerTextProfile::default(),
+            &NcCommand::ClassSet {
+                name: "Guard".into(),
+                script: "return;".into(),
+            },
+        )
         .unwrap()
         .unwrap();
         assert!(class_note.is_empty());
         assert_eq!(class[1], class_get_message("Guard").unwrap());
-        assert!(encode(&NcCommand::Quit).is_none());
+        assert!(encode(ServerTextProfile::default(), &NcCommand::Quit).is_none());
     }
 
     #[test]
