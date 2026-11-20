@@ -44,6 +44,21 @@ client speaks it in [docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
 [docs/NEXT.md](docs/NEXT.md). Contributors should read [AGENTS.md](AGENTS.md)
 for the project rules.
 
+## Getting started
+
+Download the archive for your system from the
+[Releases page](https://github.com/squirelworks/seihai-rc/releases), or build from
+source (see [Build](#build)). Your account must be staff on the game server
+(listed in its staff setting, with an IP range that allows your address). Then
+put the password in an environment variable and log in:
+
+```
+export SEIHAI_RC_PASSWORD=...
+seihai-rc players list --server 127.0.0.1:14802 --account myrc
+```
+
+`seihai-rc --help` prints every command and option with a short explanation.
+
 ## Use
 
 The password is read from an environment variable, never from the command line.
@@ -107,12 +122,46 @@ seihai-rc nc weapons --server 127.0.0.1:14804 --account myrc
 the default is the newer gen-5 login (type 6). `seihai-rc --help` lists every
 option. The account must be staff on the gserver and allowed from your IP.
 
+## Command-line options
+
+Every command takes these options where they apply:
+
+| Option | What it does |
+| --- | --- |
+| `--server HOST:PORT` | The game server to log in to (for `nc` commands, the NPC-server) |
+| `--listserver HOST:PORT` with `--pick NAME\|N` | Find the server on the listserver's RC list instead, by name or number |
+| `--discover HOST:PORT` | For `nc` commands: ask this game server for the NPC-server's address first |
+| `--account NAME` | The RC account |
+| `--password-env VAR` | The environment variable with the password (default `SEIHAI_RC_PASSWORD`). Passwords are never taken on the command line |
+| `--rc gen5\|classic` | Login type: `gen5` (type 6, the default) or `classic` (type 1, the 2000 to 2002 RCs) |
+| `--token TOKEN` | The 8-byte version token (default `GSERV025` for gen5, `GSERV023` for classic) |
+| `--nick NAME`, `--no-nick` | The nickname sent after the login (default `*ACCOUNT`), or none |
+| `--identity TEXT` | gen5 only: text sent after the password (off by default) |
+| `--timeout SECS` | Connect and login timeout (default 10) |
+| `--settle MS` | For `players` and `rcs`: wait until no message has come for this long before acting (default 1000) |
+| `--secure-login`, `--server-key KEY` | For `servers`: get the RC list over Seihai's secure login, checking the listserver's Ed25519 key |
+| `--server-profile P` | How tokenized NC text is written for the server: `seihai-gserver`, `gserver-v2-seihai`, `gserver-v2-beta4` or `seihai-gserver-legacy`; by default it is read from the server's `Server:` line |
+| `--tsv`, `--json` | Machine-readable output for the list commands |
+| `-v`, `--verbose` | Also show the ids of messages not printed as text |
+| `--help`, `-V`, `--version` | Print the usage or the version |
+
+Options that belong to one command, such as `--set`, `--set-file`, `--script`,
+`--image`, `--out`, `--yes` and the `accounts` field options (`--email`,
+`--banned`, `--admin-level` and so on), are described for each command in
+`seihai-rc --help`.
+
 ## Build
 
+Install Rust from [rustup.rs](https://rustup.rs/) the first time, then:
+
 ```
+git clone https://github.com/squirelworks/seihai-rc.git
+cd seihai-rc
 cargo build --release
 cargo test
 ```
+
+The program is then at `target/release/seihai-rc`.
 
 ### The window
 
