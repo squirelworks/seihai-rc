@@ -23,10 +23,9 @@ seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.7
 
 [dev-dependencies]
 # The real listserver, for tests/real_listserver.rs. Same licence.
-# A listserver commit on seihai-core v0.7.1. This crate is on v0.7.2, so the
-# lock file has two cores until listserver repins; no core type crosses the
-# listserver API this crate uses, so it builds (squirelworks/seihai-core#79).
-seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "0d0c21406a825493c88b58270efc09c2264301cc" }
+# Pin a listserver commit that builds on seihai-core v0.7.2 so this
+# lock file has one core (squirelworks/seihai-core#79).
+seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "1a17236532a2595cd0e7d3211bf0061532dc4811" }
 
 # The listserver hashes and checks account passwords with argon2, which is
 # very slow unoptimised.
