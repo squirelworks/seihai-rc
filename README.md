@@ -2,37 +2,47 @@
 
 A Graal Remote Control (RC) client for server staff: players, accounts, options, files and NPC Control.
 
-Part of the Seihai server stack:
-[seihai-gserver](https://github.com/squirelworks/seihai-gserver) ·
-[seihai-npcserver](https://github.com/squirelworks/seihai-npcserver) ·
-[seihai-listserver](https://github.com/squirelworks/seihai-listserver) ·
-[seihai-rc](https://github.com/squirelworks/seihai-rc) ·
-[seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) (GPL fork of GServer-v2, ships first) ·
-[seihai-gs2lib](https://github.com/squirelworks/seihai-gs2lib) (GPL fork of gs2lib) ·
-[seihai-servertools](https://github.com/squirelworks/seihai-servertools) ·
-client: [seihai](https://github.com/squirelworks/seihai).
+Part of the Seihai project: the client [seihai](https://github.com/squirelworks/seihai)
+and its library [seihai-core](https://github.com/squirelworks/seihai-core); the Rust
+server stack [seihai-gserver](https://github.com/squirelworks/seihai-gserver),
+[seihai-listserver](https://github.com/squirelworks/seihai-listserver),
+[seihai-npcserver](https://github.com/squirelworks/seihai-npcserver),
+[seihai-rc](https://github.com/squirelworks/seihai-rc) and
+[seihai-servertools](https://github.com/squirelworks/seihai-servertools); the GPL forks
+[seihai-gserver-v2](https://github.com/squirelworks/seihai-gserver-v2) and
+[seihai-gs2lib](https://github.com/squirelworks/seihai-gs2lib); and the research notes in
+[Graal_analysis](https://github.com/squirelworks/Graal_analysis).
 
-**Status: command line, and a first window (`seihai-rc gui`, `--features gui`).** Log in directly or through the listserver's RC
-list, watch the RC chat (an empty keepalive, id 162, goes out once a minute
-so a quiet session is not dropped), list the players online, and send a private
-message, an admin message to everyone or to one player, a disconnect or
-a warp (`players pm/say/admin-pm/kick/warp`),
-and read or set an account's comments, ban and rights (`players comments/ban/rights`), and read or set a player's or an account's props (`players props`).
-List, read, change, add and delete accounts (`accounts list/get/set/add/delete`). `nc login` opens the
-separate NPC-server socket (type 3, plain zlib) when you already know its
-address. NPC Control can also find the NPC-server from the game server and
-then list, get, set and delete NPCs, classes and weapons, including class
-delete. `servers --secure-login` asks the listserver for the RC list with
-the account sealed. `files ls/get/put/mv/rename/rm/rmdir` works
-on the world's files; move, rename and the deletes are checked by listing
-again, as their layouts are not captured from a real RC yet. A live level
-editor calls `Session::list_dir`, `get_file` and `put_file` on the same RC
-session. The plan is in
-[docs/PLAN.md](docs/PLAN.md), the protocol as this client speaks it in
-[docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the ordered to-do list in
-[docs/NEXT.md](docs/NEXT.md), and the rules every contributor and coding
-agent follows in [AGENTS.md](AGENTS.md).
+## What it does
+
+seihai-rc is a command-line tool, with an optional window (`seihai-rc gui`,
+built with `--features gui`). It can:
+
+- log in directly to a game server, or pick one from the listserver's RC list
+  (`servers`, optionally over Seihai's secure login with `--secure-login`);
+- show the RC chat and who joins and leaves, keeping a quiet session alive
+  with an empty message once a minute;
+- list the players and RCs online, send a private message, an admin message
+  to one player or everyone, disconnect a player or warp them (`players`);
+- read and set a player's or an account's props, comments, ban and rights;
+- list, read, change, add and delete accounts (`accounts`);
+- browse and edit the world's files: list, download, upload, move, rename and
+  delete (`files`). Move, rename and the deletes are confirmed by listing the
+  folder again, because their exact layouts have not been captured from a real
+  RC yet;
+- read and change server options, folder config and server flags (`server`);
+- use NPC Control: find the NPC-server through the game server, or connect to
+  it directly, then list, read, change and delete NPCs, classes and weapons
+  (`nc`).
+
+The same RC session is available as a library (`Session::list_dir`,
+`get_file`, `put_file`), which a live level editor uses.
+
+More detail: the plan in [docs/PLAN.md](docs/PLAN.md), the protocol as this
+client speaks it in [docs/PROTOCOL.md](docs/PROTOCOL.md), the code layout in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the to-do list in
+[docs/NEXT.md](docs/NEXT.md). Contributors should read [AGENTS.md](AGENTS.md)
+for the project rules.
 
 ## Use
 
@@ -131,11 +141,14 @@ builds on older toolchains. Linux needs X11 or Wayland and OpenGL at run time.
 The tests run the client against small fake servers on loopback. Lab runs
 against the gserver-v2 fork are recorded in [docs/lab](docs/lab).
 
-Releases for Linux, Windows and macOS are built by GitHub Actions on each `v*`
-tag (or by hand from the Release workflow) as a draft that the owner publishes.
-The notes come from `docs/releases/v<version>.md`, written in a PR first; none
-has been released yet.
-When a release happens, what the version numbers mean and what 1.0.0 needs: [VERSIONING.md](VERSIONING.md).
+## Releases
+
+Prebuilt Linux, Windows and macOS archives are on the
+[Releases page](https://github.com/squirelworks/seihai-rc/releases); the latest
+is [v0.1.0](https://github.com/squirelworks/seihai-rc/releases/tag/v0.1.0),
+which is command-line only. The window and the `files` and `server` commands
+are newer than that release. [VERSIONING.md](VERSIONING.md) explains when a
+release is made and what the version numbers mean.
 
 ## Licence
 
