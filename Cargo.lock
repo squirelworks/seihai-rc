@@ -81,7 +81,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -802,7 +802,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1931,7 +1931,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2301,7 +2301,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2342,8 +2342,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seihai-core"
-version = "0.7.1"
-source = "git+https://github.com/squirelworks/seihai-core?tag=v0.7.1#8aabc8e005bf0dfbe42032a223457f191d8c710e"
+version = "0.7.2"
+source = "git+https://github.com/squirelworks/seihai-core?tag=v0.7.2#81ba7e24df32ff5f937d0c09e7d5f75da6aa6913"
 dependencies = [
  "base64",
  "bzip2",
@@ -2362,7 +2362,7 @@ dependencies = [
 [[package]]
 name = "seihai-listserver"
 version = "0.1.1"
-source = "git+https://github.com/squirelworks/seihai-listserver?rev=0d0c21406a825493c88b58270efc09c2264301cc#0d0c21406a825493c88b58270efc09c2264301cc"
+source = "git+https://github.com/squirelworks/seihai-listserver?rev=1a17236532a2595cd0e7d3211bf0061532dc4811#1a17236532a2595cd0e7d3211bf0061532dc4811"
 dependencies = [
  "argon2",
  "rusqlite",
@@ -3242,7 +3242,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
