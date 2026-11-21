@@ -1805,12 +1805,10 @@ fn server_profile(o: &Opts) -> Result<Option<ServerTextProfile>, String> {
 fn connect_nc(o: &Opts, c: &Common) -> Result<NcSession, String> {
     let addr = nc_address(o, c)?;
     let profile = server_profile(o)?;
-    let mut session =
-        NcSession::connect_profile(&addr, &c.account, &c.password, c.timeout, profile)
-            .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
-    let peek = Duration::from_millis(200).min(c.timeout);
-    session
-        .peek(Instant::now() + peek)
+    // Wait for the server's first NC traffic before sending a command. A
+    // short peek can expire while the gserver is still finishing login;
+    // sending a mutation or read then races that initial handshake.
+    let session = NcSession::login_profile(&addr, &c.account, &c.password, c.timeout, profile)
         .map_err(|e| format!("{addr}: NC login failed: {e}"))?;
     eprintln!(
         "connected to {addr} as {} (NPC Control; server text profile {}, {})",
@@ -2103,19 +2101,34 @@ fn cmd_nc_npc_add(
     };
     npc_add_message(ServerTextProfile::default(), &npc).map_err(|e| e.to_string())?;
     let mut session = connect_nc(o, &c)?;
+    // Drain the login's initial NPC list before sending the add, so a
+    // same-named NPC already in the world cannot be mistaken for the reply.
+    settle_nc(&mut session, o, &c)?;
+    let existing_ids: Vec<u32> = session.lists.npcs.keys().copied().collect();
     let msg = npc_add_message(session.server_profile(), &npc).map_err(|e| e.to_string())?;
     session.send(&[msg]).map_err(|e| e.to_string())?;
     let events = settle_nc(&mut session, o, &c)?;
-    if events
-        .iter()
-        .any(|event| matches!(event, NcEvent::Npc(row) if row.id == id))
-    {
-        println!("added {id}");
+    let added_id = events.iter().find_map(|event| match event {
+        NcEvent::Npc(row)
+            if !existing_ids.contains(&row.id)
+                && row.name.as_deref() == Some(name)
+                && row.kind.as_deref().map_or(true, |got| got == kind)
+                && row.level.as_deref().map_or(true, |got| got == level) =>
+        {
+            Some(row.id)
+        }
+        _ => None,
+    });
+    if let Some(added_id) = added_id {
+        if added_id != id {
+            eprintln!("server assigned NPC id {added_id} (requested {id})");
+        }
+        println!("added {added_id}");
         session.close();
         Ok(())
     } else {
         Err(format!(
-            "no NPC row (id 158) for {id} arrived; saw {}",
+            "no new NPC row (id 158) matching {name:?} arrived; saw {}",
             seen(&events)
         ))
     }
