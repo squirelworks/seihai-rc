@@ -2112,8 +2112,8 @@ fn cmd_nc_npc_add(
         NcEvent::Npc(row)
             if !existing_ids.contains(&row.id)
                 && row.name.as_deref() == Some(name)
-                && row.kind.as_deref().map_or(true, |got| got == kind)
-                && row.level.as_deref().map_or(true, |got| got == level) =>
+                && row.kind.as_deref().is_none_or(|got| got == kind)
+                && row.level.as_deref().is_none_or(|got| got == level) =>
         {
             Some(row.id)
         }
