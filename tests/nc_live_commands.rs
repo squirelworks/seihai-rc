@@ -26,10 +26,8 @@ impl Scratch {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "seihai-rc-nc-live-{}-{nonce}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("seihai-rc-nc-live-{}-{nonce}", std::process::id()));
         for child in ["config", "levels", "npcs"] {
             std::fs::create_dir_all(dir.join(child)).unwrap();
         }
@@ -85,12 +83,8 @@ impl LiveWorld {
         let server_thread = thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async move {
-                let game = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .unwrap();
-                let link = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .unwrap();
+                let game = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let link = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let game_addr = game.local_addr().unwrap().to_string();
                 let link_addr = link.local_addr().unwrap().to_string();
                 let game_task = tokio::spawn(serve(server.clone(), game));
@@ -147,7 +141,10 @@ impl LiveWorld {
             "--settle",
             &settle_ms,
         ]);
-        command.env("SEIHAI_RC_PASSWORD", PASSWORD).output().unwrap()
+        command
+            .env("SEIHAI_RC_PASSWORD", PASSWORD)
+            .output()
+            .unwrap()
     }
 }
 
@@ -182,7 +179,10 @@ fn wait_for_file(path: &Path, expected: &str) -> String {
         if contents.starts_with(expected) {
             return contents;
         }
-        assert!(Instant::now() < deadline, "expected {expected:?}, got {contents:?}");
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected:?}, got {contents:?}"
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -217,10 +217,7 @@ fn shipped_nc_add_warp_reset_and_cleanup_run_against_live_servers() {
     );
 
     assert_eq!(
-        successful(
-            live.run_nc(&["nc", "npc", "reset", "1"]),
-            "nc npc reset 1"
-        ),
+        successful(live.run_nc(&["nc", "npc", "reset", "1"]), "nc npc reset 1"),
         "reset 1\n"
     );
 
@@ -282,7 +279,9 @@ fn shipped_nc_add_warp_reset_and_cleanup_run_against_live_servers() {
     );
     let deleted_prefix = format!("{added_id}\t");
     assert!(
-        !listing.lines().any(|line| line.starts_with(&deleted_prefix)),
+        !listing
+            .lines()
+            .any(|line| line.starts_with(&deleted_prefix)),
         "deleted NPC remained in live readback: {listing}"
     );
 }
