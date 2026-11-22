@@ -31,7 +31,8 @@ use seihai_rc::rc::{
     discover_npc_servers, Event, LoginParams, NpcServerFound, PlayerEntry, RcKind, Session,
 };
 use seihai_rc::server::{
-    flags_get, flags_set, normalized, parse_flags, parse_text, plo as server_plo, ServerText,
+    flags_get, flags_match_readback, flags_set, normalized, parse_flags, parse_text,
+    plo as server_plo, ServerText,
 };
 use seihai_rc::wire::ServerTextProfile;
 
@@ -1028,12 +1029,7 @@ fn cmd_server_flags(o: &Opts) -> Result<(), String> {
         println!("{f}");
     }
     eprintln!("{} flag(s) before, {} after", before.len(), after.len());
-    // The server may keep flags in its own order.
-    let mut a = normalized(&after);
-    let mut w = normalized(&want);
-    a.sort();
-    w.sort();
-    if a != w {
+    if !flags_match_readback(&want, &after) {
         return Err("the server read back other flags than were sent".into());
     }
     Ok(())

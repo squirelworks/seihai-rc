@@ -28,7 +28,8 @@ use crate::rc::{
     PlayerList, Session,
 };
 use crate::server::{
-    flags_get, flags_set, normalized, parse_flags, parse_text, plo as server_plo, ServerText,
+    flags_get, flags_match_readback, flags_set, normalized, parse_flags, parse_text,
+    plo as server_plo, ServerText,
 };
 
 /// How long the worker waits for an event before it looks for commands.
@@ -591,7 +592,12 @@ impl RcView {
             Update::ServerText { kind, lines } => {
                 if let Some((want_kind, want)) = self.server_sent.take() {
                     if want_kind == kind {
-                        self.push(if normalized(&lines) == normalized(&want) {
+                        let matches = if kind == ServerKind::Flags {
+                            flags_match_readback(&want, &lines)
+                        } else {
+                            normalized(&lines) == normalized(&want)
+                        };
+                        self.push(if matches {
                             format!("[saved] the {} read back as sent", kind.name())
                         } else {
                             format!(
