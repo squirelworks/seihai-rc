@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use seihai_core::protocol::{split_messages, zlib_decompress, Message};
 use seihai_rc::link::Codec;
-use seihai_rc::live::{Command, LiveSession, RcView, Status, Update};
+use seihai_rc::live::{Command, LiveSession, RcView, ServerKind, Status, Update};
 use seihai_rc::rc::{Event, LoginParams, RcKind};
-use seihai_rc::wire::{gchar, message, push_gstring};
+use seihai_rc::wire::{gchar, message, push_gshort, push_gstring};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -55,6 +55,13 @@ fn addplayer(id: u16, account: &str, level: &str) -> Vec<u8> {
 /// (DELPLAYER) and props get (the captured 72), and records what came.
 /// With `end_after_kick` it closes the link after answering a kick.
 fn fake_gserver(end_after_kick: bool) -> (String, thread::JoinHandle<Vec<Message>>) {
+    fake_gserver_with_flags(end_after_kick, &[])
+}
+
+fn fake_gserver_with_flags(
+    end_after_kick: bool,
+    flags: &'static [&'static [u8]],
+) -> (String, thread::JoinHandle<Vec<Message>>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap().to_string();
     let h = thread::spawn(move || {
@@ -91,6 +98,14 @@ fn fake_gserver(end_after_kick: bool) -> (String, thread::JoinHandle<Vec<Message
                             seen.push(m);
                             return seen;
                         }
+                    }
+                    68 => {
+                        let mut reply = Vec::new();
+                        push_gshort(&mut reply, flags.len() as u16);
+                        for flag in flags {
+                            push_gstring(&mut reply, flag);
+                        }
+                        send_msgs(&mut s, &mut codec, &[message(61, &reply)]);
                     }
                     73 => {
                         let mut r = m.payload.clone();
@@ -252,4 +267,70 @@ fn event_lines_match_the_login_command() {
         Some("[pm from 4] yo".into())
     );
     assert_eq!(event_line(&Event::Signature, true), None);
+}
+
+fn save_flags_through_live_session(kept: &'static [&'static [u8]]) -> RcView {
+    let (addr, peer) = fake_gserver_with_flags(false, kept);
+    let live = LiveSession::start(addr, params(RcKind::Gen5), TIMEOUT);
+    let mut view = RcView::default();
+    pump(&live, &mut view, |v| v.players.players.len() == 3);
+
+    let kind = ServerKind::Flags;
+    let input = "z=1\na=2";
+    view.expect_server_set(kind, input);
+    assert!(live.send(Command::ServerSet(kind, input.into())));
+    pump(&live, &mut view, |v| v.server.contains_key(&kind));
+    assert!(view.server_sent.is_none());
+
+    drop(live);
+    let seen = peer.join().unwrap();
+    let flag_messages: Vec<_> = seen.iter().filter(|m| matches!(m.id, 68 | 69)).collect();
+    assert_eq!(flag_messages.len(), 2);
+    assert_eq!(flag_messages[0].id, 69);
+    assert_eq!(flag_messages[0].payload.as_slice(), b" \"#z=1#a=2");
+    assert_eq!(flag_messages[1].id, 68);
+    assert!(flag_messages[1].payload.is_empty());
+    view
+}
+
+#[test]
+fn live_flag_save_accepts_the_same_flags_in_server_order() {
+    let view = save_flags_through_live_session(&[b"a=2", b"z=1"]);
+    assert_eq!(view.server[&ServerKind::Flags], ["a=2", "z=1"]);
+    assert_eq!(
+        view.log.last().map(String::as_str),
+        Some("[saved] the server flags read back as sent")
+    );
+}
+
+#[test]
+fn live_flag_save_reports_missing_changed_or_extra_flags() {
+    const REPLIES: &[&[&[u8]]] = &[&[b"z=1"], &[b"a=3", b"z=1"], &[b"a=2", b"a=2", b"z=1"]];
+    for &kept in REPLIES {
+        let view = save_flags_through_live_session(kept);
+        assert_eq!(
+            view.log.last().map(String::as_str),
+            Some("[error] the server kept other server flags than were sent")
+        );
+    }
+}
+
+#[test]
+fn server_text_save_still_compares_options_and_folders_in_order() {
+    for kind in [ServerKind::Options, ServerKind::Folders] {
+        let mut view = RcView::default();
+        view.expect_server_set(kind, "first\nsecond");
+        view.apply(Update::ServerText {
+            kind,
+            lines: vec!["second".into(), "first".into()],
+        });
+        assert_eq!(view.server[&kind], ["second", "first"]);
+        assert_eq!(
+            view.log,
+            [format!(
+                "[error] the server kept other {} than were sent",
+                kind.name()
+            )]
+        );
+    }
 }
