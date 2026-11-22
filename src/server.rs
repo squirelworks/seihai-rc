@@ -130,6 +130,15 @@ pub fn normalized(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Compare requested flags with their read-back. The server may reorder them.
+pub fn flags_match_readback(sent: &[String], received: &[String]) -> bool {
+    let mut sent = normalized(sent);
+    let mut received = normalized(received);
+    sent.sort();
+    received.sort();
+    sent == received
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
