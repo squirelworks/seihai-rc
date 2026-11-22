@@ -26,6 +26,11 @@ seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.7
 # Pin a listserver commit that builds on seihai-core v0.7.2 so this
 # lock file has one core (squirelworks/seihai-core#79).
 seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", rev = "1a17236532a2595cd0e7d3211bf0061532dc4811" }
+# The real gserver and NPC-server for tests/nc_live_commands.rs. Keep the
+# NPC-server revision in sync with the gserver's pinned link implementation.
+seihai-gserver = { git = "https://github.com/squirelworks/seihai-gserver", rev = "3fec346993f3d871545d9137b35f37a9c3748458" }
+seihai-npcserver = { git = "https://github.com/squirelworks/seihai-npcserver", rev = "c8dc6bda982c858e466f2c2be64ba0ed2cf90c57" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
 # The listserver hashes and checks account passwords with argon2, which is
 # very slow unoptimised.

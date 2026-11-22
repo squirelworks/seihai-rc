@@ -174,6 +174,11 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
         match plan {
             NcPlan::Push(msgs) => send_msgs(&mut stream, &mut codec, &msgs),
             NcPlan::Reply { id, payload, reply } => {
+                send_msgs(
+                    &mut stream,
+                    &mut codec,
+                    &[message(74, b"Server: seihai-gserver 0.9.0")],
+                );
                 let frame = read_raw_frame(&mut stream).expect("request frame");
                 let msgs = split_messages(&codec.decode(&frame).unwrap());
                 assert_eq!(msgs.len(), 1, "{msgs:?}");
@@ -185,6 +190,11 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
                 }
             }
             NcPlan::Expect { messages, reply } => {
+                send_msgs(
+                    &mut stream,
+                    &mut codec,
+                    &[message(74, b"Server: seihai-gserver 0.9.0")],
+                );
                 seen = expect_frame(&mut stream, &mut codec, &messages, &reply);
             }
             NcPlan::GreetExpect {
@@ -192,7 +202,12 @@ fn fake_nc(plan: NcPlan) -> (String, thread::JoinHandle<Vec<Message>>) {
                 messages,
                 reply,
             } => {
-                send_msgs(&mut stream, &mut codec, &greet);
+                let initial = if greet.is_empty() {
+                    vec![npc_row(2, "bell", "OBJECT", "start.nw")]
+                } else {
+                    greet
+                };
+                send_msgs(&mut stream, &mut codec, &initial);
                 seen = expect_frame(&mut stream, &mut codec, &messages, &reply);
             }
         }
