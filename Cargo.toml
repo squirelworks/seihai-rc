@@ -28,7 +28,7 @@ seihai-core = { git = "https://github.com/squirelworks/seihai-core", tag = "v0.8
 seihai-listserver = { git = "https://github.com/squirelworks/seihai-listserver", tag = "v0.1.2" }
 # The real gserver and NPC-server for tests/nc_live_commands.rs. Keep the
 # NPC-server revision in sync with the gserver's pinned link implementation.
-seihai-gserver = { git = "https://github.com/squirelworks/seihai-gserver", rev = "3fec346993f3d871545d9137b35f37a9c3748458" }
+seihai-gserver = { git = "https://github.com/squirelworks/seihai-gserver", rev = "ae228b284227b83ad6fd272560547f0d13bf538f" }
 seihai-npcserver = { git = "https://github.com/squirelworks/seihai-npcserver", tag = "v0.1.3" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 
